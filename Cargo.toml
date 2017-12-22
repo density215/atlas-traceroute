@@ -1,0 +1,16 @@
+[package]
+name = "traceroute"
+version = "0.1.0"
+description = "Traceroute compliant with RIPE Atlas probes"
+authors = ["Jasper den Hertog <jasper@plainspace.com>"]
+readme = "README.md"
+repository = "https://github.com/density215/atlas-traceroute"
+keywords = ["traceroute", "ripe atlas"]
+
+[dependencies]
+libc = "0.1.10"
+socket2 = "0.2.4"
+pnet="0.20.0"
+rand = "0.3"
+time = "0.1"
+dns-lookup="0.8.1"
