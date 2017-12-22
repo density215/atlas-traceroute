@@ -1,4 +1,4 @@
-# atlas-traceroute
+# Atlas-traceroute
 
 Re-implentation in Rust of the traceroute command as run by the [RIPE Atlas](https://atlas.ripe.net) Probes.
 
@@ -11,9 +11,11 @@ This re-implentation wants to be the following things:
 
 Right now, it's not more than a implentation of a ICMPv4 traceroute with hostname lookup for all hophosts.
 
-# installation
+# Installation
 
 I am not supplying binaries for any platforms anytime soon. 
 So you'll have to have an up-to-date Rust installation, probably set up with `rustup`.
 
-Then you could run it with `sudo cargo run -- <IP_ADDRESS_OR_HOSTNAME>` or build it with `cargo build` and then use the binray in `target/debug`. 
+Then you could run it with `sudo cargo run -- <IP_ADDRESS_OR_HOSTNAME>` or build it with `cargo build` and then use the binary in `target/debug`. 
+
+Normal caveats around using RAW_SOCKET apply to all platforms probably (hence the `sudo`).
