@@ -2,7 +2,7 @@
 
 Re-implentation in Rust of the traceroute command as run by the [RIPE Atlas](https://atlas.ripe.net) Probes.
 
-This re-implentation hast the following targets:
+This re-implentation has the following objectives:
 - Fully compliant with the specs of the traceroutes that are ran by the RIPE Atlas probes,
   meaning being able to run ICMP, UDP and TCP in ipv4/ipv6 with all options.
 - RIPE Atlas compliant JSON output.
