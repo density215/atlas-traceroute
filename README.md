@@ -8,6 +8,8 @@ This re-implentation hast the following targets:
 - A Stand-alone CLI tool. Just run traceroute <OPTIONS> <IP-ADDRESS OR HOSTNAME>.
 - As cross-platform as possible. Should at leat run on OSX, Linux and win32. Any BSDs would be great.
 - Use as many (rest) APIs as possible to enrich the traceroute, e.g. location data for hop hosts, AS allocations of hop hosts, etc.
+- Offer async, concurrent packet tx/rx, as well as async dns lookups.
+- Run simultaneous dual-stack traceroutes.
 
 implemented features right now:
 
@@ -16,7 +18,7 @@ implemented features right now:
 - hostname lookups
 - interface auto-detection
 
-everything untested.
+everything untested. everything still run synchronised.
 
 # installation
 
