@@ -75,7 +75,7 @@ pub struct TraceHop {
 }
 
 impl TraceResult {
-    fn get_sock_addr2<'a>(&self) -> SockAddr {
+    fn get_sock_addr<'a>(&self) -> SockAddr {
         let filter_public_if_for_af = |addr: &IpNetwork| match self.af {
             AddressFamily::V4 => addr.is_ipv4() && !addr.ip().is_loopback(),
             AddressFamily::V6 => addr.is_ipv6() && addr.ip().is_global(),
@@ -157,7 +157,7 @@ impl TraceResult {
     }
 
     fn find_next_hop(&mut self) -> io::Result<TraceHop> {
-        let src = self.get_sock_addr2();
+        let src = self.get_sock_addr();
         println!("src: {:?}", src);
         let socket = self.create_socket(); //.bind(&src).unwrap();
         socket.bind(&src).unwrap();
