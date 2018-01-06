@@ -10,6 +10,8 @@ keywords = ["traceroute", "ripe atlas"]
 [dependencies]
 socket2 = { path = "socket2-rs" }
 pnet = { path = "libpnet" }
+ipnetwork = "0.12.7"
+ipaddress = "0.1.1"
 rand = "0.3"
 time = "0.1"
 dns-lookup="0.8.1"
