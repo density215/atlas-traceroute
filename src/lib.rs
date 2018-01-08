@@ -119,7 +119,7 @@ impl TraceResult {
                 echo_request_packet.set_identifier(self.ident);
                 echo_request_packet.set_sequence_number(self.seq_num);
                 // checksum needs to be set automatically
-                // failing to set will have the traceroute until exhaustion
+                // failing to set will have the traceroute run until exhaustion
                 let p_checksum = checksum(&IcmpPacket::new(&echo_request_packet.packet()).unwrap());
                 echo_request_packet.set_checksum(p_checksum);
                 echo_request_packet.packet().to_owned()
@@ -135,10 +135,11 @@ impl TraceResult {
         }
     }
 
-    // TODO: make this work. Should retrieve the IP version and return the right package struct.
     fn unwrap_payload_ip_packet_in(&mut self, buf_in: &[u8]) -> IcmpPacketIn {
         match self.af {
             AddressFamily::V4 => IcmpPacketIn::V4(Ipv4Packet::owned(buf_in.to_owned()).unwrap()),
+            // IPv6 holds IP header of incoming packet in ancillary data, so
+            // we unpack the ICMPv6 packet directly here.
             AddressFamily::V6 => IcmpPacketIn::V6(Icmpv6Packet::owned(buf_in.to_owned()).unwrap()),
         }
     }
