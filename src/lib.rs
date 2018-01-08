@@ -159,7 +159,7 @@ impl TraceResult {
     fn find_next_hop(&mut self) -> io::Result<TraceHop> {
         let src = self.get_sock_addr();
         println!("src: {:?}", src);
-        let socket = self.create_socket(); //.bind(&src).unwrap();
+        let socket = self.create_socket();
         socket.bind(&src).unwrap();
         println!("{:?}", socket);
 
@@ -326,7 +326,7 @@ pub fn start<'a, T: ToSocketAddrs>(address: T) -> io::Result<TraceResult> {
     sync_start_with_timeout(address, Duration::seconds(1))
 }
 
-/// Run-of-the-mill icmp ipv4 traceroute implementation (for now)
+/// Run-of-the-mill icmp ipv4/ipv6 traceroute implementation (for now)
 // Completely synchronous. Every packet that's send will trigger a wait for its return
 pub fn sync_start_with_timeout<'a, T: ToSocketAddrs>(
     address: T,
