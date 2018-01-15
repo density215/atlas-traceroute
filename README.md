@@ -19,7 +19,7 @@ implemented features right now:
 - hostname lookups
 - interface auto-detection
 
-everything untested. everything still run synchronised.
+everything untested. everything still runs synchronised.
 
 # Installation
 
