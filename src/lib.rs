@@ -199,10 +199,7 @@ impl TraceResult {
     ) -> Result<(), Error> {
         match icmp_packet_in.get_icmpv6_type() {
             Icmpv6Types::EchoReply => {
-                //println!("Echo reply in: {:?}", icmp_packet_in);
                 //println!("icmp payload: {:02x}", icmp_packet_in.payload().as_hex());
-                //let host = SocketAddr::V6(sender.as_inet6().unwrap());
-                //let icmp_echo_reply = &icmp_packet_in;
                 if icmp_packet_in.get_identifier() == self.ident
                     && icmp_packet_in.get_sequence_number() == self.seq_num
                 {
@@ -258,20 +255,15 @@ impl TraceResult {
 
     #[allow(unused_variables)]
     fn find_next_hop(&mut self) -> io::Result<TraceHop> {
-        //let src = self.get_sock_addr();
-        //println!("src: {:?}", self.src_addr);
         let socket = self.create_socket();
         socket.bind(&self.src_addr).unwrap();
-        //println!("{:?}", socket);
 
         loop {
             self.seq_num += 1;
             let packet_out = self.make_echo_request_packet_out().to_owned();
 
-            //println!("hophost: {:?}", self.dst_addr);
             self.ttl += 1;
             let ttl = self.set_ttl(&socket);
-            //println!("hops: {:?}", ttl.unwrap());
             try!(socket.set_read_timeout(Some(self.timeout.to_std().unwrap())));
 
             let wrote = try!(socket.send_to(&packet_out, &<SockAddr>::from(self.dst_addr)));
