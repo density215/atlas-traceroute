@@ -8,6 +8,7 @@ fn main() {
     let ip: String = args.nth(1).unwrap() + ":0";
     let addr: &str = &ip;
     println!("dst_name: {}", env::args().nth(1).unwrap());
+    
     for result_ip in traceroute::start(addr).unwrap() {
         for hop in result_ip.result {
             //let hop = result_ip; // .unwrap();
