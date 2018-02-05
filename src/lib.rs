@@ -285,6 +285,9 @@ impl TraceRoute {
                 if wrapped_ip_packet.payload()[4..8] == packet_out[4..8] {
                     Ok(())
                 } else {
+                    println!("{:?}", &wrapped_ip_packet.payload());
+                    println!("{:?}", &packet_out);
+                    println!("{:?}", &icmp_packet_in.packet()[..64]);
                     Err(Error::new(
                         ErrorKind::InvalidData,
                         "invalid TimeExceeded packet",
@@ -497,16 +500,21 @@ pub fn sync_start_with_timeout<'a, T: ToSocketAddrs>(
         _ => (),
     };
 
-    const AF: AddressFamily = AddressFamily::V4;
+    //let first_addr = try!(address.to_socket_addrs());
 
-    let socket_in = match AF {
-        AddressFamily::V4 => {
-            Socket::new(Domain::ipv4(), Type::raw(), Some(<Protocol>::icmpv4())).unwrap()
-        }
-        AddressFamily::V6 => {
-            Socket::new(Domain::ipv6(), Type::raw(), Some(<Protocol>::icmpv6())).unwrap()
-        }
+    let socket_in = match address.to_socket_addrs().unwrap().next().unwrap().is_ipv4() {
+        true => Socket::new(Domain::ipv4(), Type::raw(), Some(<Protocol>::icmpv4())).unwrap(),
+        false => Socket::new(Domain::ipv6(), Type::raw(), Some(<Protocol>::icmpv6())).unwrap(),
     };
+
+    // let socket_in = match AF {
+    //     AddressFamily::V4 => {
+    //         Socket::new(Domain::ipv4(), Type::raw(), Some(<Protocol>::icmpv4())).unwrap()
+    //     }
+    //     AddressFamily::V6 => {
+    //         Socket::new(Domain::ipv6(), Type::raw(), Some(<Protocol>::icmpv6())).unwrap()
+    //     }
+    // };
 
     socket_in
         .set_nonblocking(false)
@@ -532,7 +540,7 @@ pub fn sync_start_with_timeout<'a, T: ToSocketAddrs>(
                         TraceRoute {
                             src_addr: src_addr,
                             dst_addr: dst_addr,
-                            af: AF,
+                            af: AddressFamily::V4,
                             proto: TraceProtocol::UDP,
                             ttl: 0,
                             ident: rand::random(),
@@ -549,7 +557,7 @@ pub fn sync_start_with_timeout<'a, T: ToSocketAddrs>(
                         TraceRoute {
                             src_addr: src_addr,
                             dst_addr: dst_addr,
-                            af: AF,
+                            af: AddressFamily::V6,
                             proto: TraceProtocol::UDP,
                             ttl: 0,
                             ident: rand::random(),
