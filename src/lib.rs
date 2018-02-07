@@ -22,6 +22,7 @@ use pnet::packet::icmpv6::{Icmpv6Packet, Icmpv6Types};
 use pnet::packet::icmp::echo_request::MutableEchoRequestPacket;
 use pnet::packet::icmp::echo_reply::EchoReplyPacket;
 use pnet::packet::icmp::time_exceeded::TimeExceededPacket;
+use pnet::packet::icmp::destination_unreachable::DestinationUnreachablePacket;
 use pnet::packet::udp::{MutableUdpPacket, UdpPacket};
 use pnet::packet::Packet;
 use pnet::packet::icmp::checksum;
@@ -38,8 +39,8 @@ use hex_slice::AsHex;
 const MAX_PACKET_SIZE: usize = 4096 + 128;
 const ICMP_HEADER_LEN: usize = 8;
 const UDP_HEADER_LEN: usize = 8;
-const SRC_BASE_PORT: u16 = 20480;
-const DST_BASE_PORT: u16 = 80;
+const SRC_BASE_PORT: u16 = 0x5000;
+const DST_BASE_PORT: u16 = 0x8000 + 666;
 const DEFAULT_TRT_COUNT: u8 = 3;
 
 #[derive(Debug)]
@@ -100,10 +101,10 @@ pub struct TraceHop {
     pub size: usize,
 }
 
-fn get_sock_addr<'a>(af: AddressFamily) -> SockAddr {
+fn get_sock_addr<'a>(af: &AddressFamily, port: u16) -> SockAddr {
     let filter_public_if_for_af = |addr: &IpNetwork| match af {
-        AddressFamily::V4 => addr.is_ipv4() && !addr.ip().is_loopback(),
-        AddressFamily::V6 => addr.is_ipv6() && addr.ip().is_global(),
+        &AddressFamily::V4 => addr.is_ipv4() && !addr.ip().is_loopback(),
+        &AddressFamily::V6 => addr.is_ipv6() && addr.ip().is_global(),
     };
     let interfaces = pnet::datalink::interfaces();
     let interface = interfaces
@@ -114,11 +115,11 @@ fn get_sock_addr<'a>(af: AddressFamily) -> SockAddr {
         .map(|a| a.ip())
         .nth(0)
         .unwrap();
-    println!("src_addr: {:?}", interface);
+    //println!("src_addr: {:?}, port: {:02x}", interface, &[port].as_hex());
 
     match interface {
-        IpAddr::V4(addrv4) => <SockAddr>::from(SocketAddrV4::new(addrv4, SRC_BASE_PORT)),
-        IpAddr::V6(addrv6) => <SockAddr>::from(SocketAddrV6::new(addrv6, SRC_BASE_PORT, 0, 0x0)),
+        IpAddr::V4(addrv4) => <SockAddr>::from(SocketAddrV4::new(addrv4, port)),
+        IpAddr::V6(addrv6) => <SockAddr>::from(SocketAddrV6::new(addrv6, port, 0, 0x0)),
     }
 }
 
@@ -240,6 +241,57 @@ impl TraceRoute {
         packet_in
     }
 
+    fn analyse_time_exceeded_packet_in(
+        &self,
+        wrapped_ip_packet: Ipv4Packet,
+        icmp_packet_in: &IcmpPacket,
+        packet_out: &[u8],
+    ) -> Result<(), Error> {
+        // We don't have any ICMP data right now
+        // So we're only using the last 4 bytes in the payload to compare.
+        match &self.proto {
+            &TraceProtocol::ICMP if wrapped_ip_packet.payload()[4..8] == packet_out[4..8] => Ok(()),
+            &TraceProtocol::UDP if wrapped_ip_packet.payload()[8..16] == packet_out[..8] => Ok(()),
+            /* Unfortunately, cheap home routers may
+             * forget to restore the checksum field
+             * when they are doing NAT. Ignore the
+             * sequence number if it seems wrong.
+             */
+            &TraceProtocol::UDP if wrapped_ip_packet.payload()[..4] == packet_out[..4] => {
+                println!("checksum invalid - ignoring");
+
+                print!("packet out {:?}: {:02x}", &self.proto, &packet_out.as_hex());
+                print!(" -> ");
+                println!(
+                    "icmp payload: {:02x}",
+                    &wrapped_ip_packet.payload()[..8].as_hex()
+                );
+                println!(
+                    "64b of icmp in packet: {:02x}",
+                    &icmp_packet_in.packet()[..8].as_hex()
+                );
+
+                Ok(())
+            }
+            _ => {
+                print!("packet out {:?}: {:02x}", &self.proto, &packet_out.as_hex());
+                print!(" -> ");
+                println!(
+                    "icmp payload: {:02x}",
+                    &wrapped_ip_packet.payload()[..64].as_hex()
+                );
+                println!(
+                    "64b of icmp in packet: {:02x}",
+                    &icmp_packet_in.packet()[..64].as_hex()
+                );
+                Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "invalid TimeExceeded packet",
+                ))
+            }
+        }
+    }
+
     fn analyse_v4_payload(
         &mut self,
         packet_out: &[u8],
@@ -247,24 +299,9 @@ impl TraceRoute {
         ip_payload: &[u8],
     ) -> Result<(), Error> {
         match icmp_packet_in.get_icmp_type() {
-            IcmpTypes::EchoReply => {
-                let icmp_echo_reply = EchoReplyPacket::new(&ip_payload).unwrap();
-                if icmp_echo_reply.get_identifier() == self.ident
-                    && icmp_echo_reply.get_sequence_number() == self.seq_num
-                {
-                    self.done = true;
-                    Ok(())
-                } else {
-                    Err(Error::new(ErrorKind::InvalidData, "invalid "))
-                }
-            }
-            IcmpTypes::DestinationUnreachable => {
-                self.done = true;
-                Err(Error::new(
-                    ErrorKind::AddrNotAvailable,
-                    "destination unreachable",
-                ))
-            }
+
+            // This is where intermediate packets with TTL set to lower than the number of hops
+            // to the final server should be answered as.
             IcmpTypes::TimeExceeded => {
                 // `Time Exceeded` packages do not have a identifier or sequence number
                 // They do return up to 576 bytes of the original IP packet
@@ -281,55 +318,36 @@ impl TraceRoute {
 
                 // We don't have any ICMP data right now
                 // So we're only using the last 4 bytes in the payload to compare.
-                match &self.proto {
-                    &TraceProtocol::ICMP
-                        if wrapped_ip_packet.payload()[4..8] == packet_out[4..8] =>
-                    {
-                        Ok(())
-                    }
-                    &TraceProtocol::UDP
-                        if wrapped_ip_packet.payload()[8..16] == packet_out[..8] =>
-                    {
-                        Ok(())
-                    }
-                    /* Unfortunately, cheap home routers may
-                     * forget to restore the checksum field
-                     * when they are doing NAT. Ignore the
-                     * sequence number if it seems wrong.
-                     */
-                    &TraceProtocol::UDP if wrapped_ip_packet.payload()[..4] == packet_out[..4] => {
-                        println!("checksum invalid - ignoring");
+                // match &self.proto {
+                self.analyse_time_exceeded_packet_in(wrapped_ip_packet, &icmp_packet_in, packet_out)
+            }
 
-                        print!("packet out {:?}: {:02x}", &self.proto, &packet_out.as_hex());
-                        print!(" -> ");
-                        println!(
-                            "icmp payload: {:02x}",
-                            &wrapped_ip_packet.payload()[..8].as_hex()
-                        );
-                        println!(
-                            "64b of icmp in packet: {:02x}",
-                            &icmp_packet_in.packet()[..8].as_hex()
-                        );
-
-                        Ok(())
-                    }
-                    _ => {
-                        print!("packet out {:?}: {:02x}", &self.proto, &packet_out.as_hex());
-                        print!(" -> ");
-                        println!(
-                            "icmp payload: {:02x}",
-                            &wrapped_ip_packet.payload()[..64].as_hex()
-                        );
-                        println!(
-                            "64b of icmp in packet: {:02x}",
-                            &icmp_packet_in.packet()[..64].as_hex()
-                        );
-                        Err(Error::new(
-                            ErrorKind::InvalidData,
-                            "invalid TimeExceeded packet",
-                        ))
-                    }
+            // If the outgoing packet was icmp then the final
+            // packages from the requested server should come as ICMP type Echo Reply
+            IcmpTypes::EchoReply => {
+                let icmp_echo_reply = EchoReplyPacket::new(&ip_payload).unwrap();
+                if icmp_echo_reply.get_identifier() == self.ident
+                    && icmp_echo_reply.get_sequence_number() == self.seq_num
+                {
+                    self.done = true;
+                    Ok(())
+                } else {
+                    Err(Error::new(ErrorKind::InvalidData, "invalid "))
                 }
+            }
+
+            // UDP and TCP packets that were send out should get these as the final answer,
+            // that is, only if the requested server does not listen on the destiation port!
+            IcmpTypes::DestinationUnreachable => {
+                self.done = true;
+
+                let dest_unreachable = DestinationUnreachablePacket::new(&ip_payload)
+                    .unwrap()
+                    .payload()
+                    .to_owned();
+                let wrapped_ip_packet = Ipv4Packet::new(&dest_unreachable).unwrap();
+                //println!("{:02x}", wrapped_ip_packet.packet().as_hex());
+                self.analyse_time_exceeded_packet_in(wrapped_ip_packet, &icmp_packet_in, packet_out)
             }
             _ => Err(Error::new(ErrorKind::Other, "unidentified packet type")),
         }
@@ -407,9 +425,6 @@ impl TraceRoute {
 
     #[allow(unused_variables)]
     fn find_next_hop(&mut self) -> io::Result<TraceResult> {
-        let socket_out = self.create_socket(true);
-        socket_out.bind(&self.src_addr).unwrap();
-
         // let socket_in = match self.proto {
         //     TraceProtocol::ICMP => socket_out.try_clone().unwrap(),
         //     _ => {
@@ -431,12 +446,15 @@ impl TraceRoute {
             //let packet_out = self.make_echo_request_packet_out().to_owned();
 
             self.ttl += 1;
-            let ttl = self.set_ttl(&socket_out);
             let mut trace_hops = Vec::with_capacity(DEFAULT_TRT_COUNT as usize);
 
             // After deadline passes, restart the loop to advance the TTL and resend.
             for count in 0..DEFAULT_TRT_COUNT {
+                let socket_out = self.create_socket(true);
+                let ttl = self.set_ttl(&socket_out);
                 self.ident = SRC_BASE_PORT - <u16>::from(rand::random::<u8>());
+                let src = get_sock_addr(&self.af, self.ident);
+                socket_out.bind(&src).unwrap();
                 //println!("{:?}", self.ident);
                 //self.seq_num = rand::random::<u16>();
                 let packet_out = match self.proto {
@@ -447,7 +465,9 @@ impl TraceRoute {
                 //let packet_out = icmp_out;
                 println!(
                     "ttl: {:?}, seq: {:?}, id: {:02x}",
-                    self.ttl, self.seq_num, &[self.ident].as_hex()
+                    self.ttl,
+                    self.seq_num,
+                    &[self.ident].as_hex()
                 );
                 self.dst_addr.set_port(self.seq_num + DST_BASE_PORT);
                 println!("src_port: {:02x}", &[self.dst_addr.port()].as_hex());
@@ -629,7 +649,7 @@ pub fn sync_start_with_timeout<'a, T: ToSocketAddrs>(
             Ok({
                 match dst_addr.is_ipv4() {
                     true => {
-                        let src_addr = get_sock_addr(AddressFamily::V4);
+                        let src_addr = get_sock_addr(&AddressFamily::V4, SRC_BASE_PORT);
                         dst_addr.set_port(DST_BASE_PORT);
                         TraceRoute {
                             src_addr: src_addr,
@@ -646,7 +666,7 @@ pub fn sync_start_with_timeout<'a, T: ToSocketAddrs>(
                         }
                     }
                     false => {
-                        let src_addr = get_sock_addr(AddressFamily::V6);
+                        let src_addr = get_sock_addr(&AddressFamily::V6, SRC_BASE_PORT);
                         dst_addr.set_port(DST_BASE_PORT);
                         TraceRoute {
                             src_addr: src_addr,
