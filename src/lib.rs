@@ -241,13 +241,13 @@ impl TraceRoute {
         packet_in
     }
 
-    fn analyse_time_exceeded_packet_in(
+    fn analyse_icmp_packet_in(
         &self,
         wrapped_ip_packet: Ipv4Packet,
         icmp_packet_in: &IcmpPacket,
         packet_out: &[u8],
     ) -> Result<(), Error> {
-        // We don't have any ICMP data right now
+        // We don't have any ICMP header data right now
         // So we're only using the last 4 bytes in the payload to compare.
         match &self.proto {
             &TraceProtocol::ICMP if wrapped_ip_packet.payload()[4..8] == packet_out[4..8] => Ok(()),
@@ -299,10 +299,10 @@ impl TraceRoute {
         ip_payload: &[u8],
     ) -> Result<(), Error> {
         match icmp_packet_in.get_icmp_type() {
-
-            // This is where intermediate packets with TTL set to lower than the number of hops
-            // to the final server should be answered as.
             IcmpTypes::TimeExceeded => {
+                // This is where intermediate packets with TTL set to lower than the number of hops
+                // to the final server should be answered as.
+                //
                 // `Time Exceeded` packages do not have a identifier or sequence number
                 // They do return up to 576 bytes of the original IP packet
                 // So that's where we identify the packet to belong to this `packet_out`.
@@ -318,8 +318,7 @@ impl TraceRoute {
 
                 // We don't have any ICMP data right now
                 // So we're only using the last 4 bytes in the payload to compare.
-                // match &self.proto {
-                self.analyse_time_exceeded_packet_in(wrapped_ip_packet, &icmp_packet_in, packet_out)
+                self.analyse_icmp_packet_in(wrapped_ip_packet, &icmp_packet_in, packet_out)
             }
 
             // If the outgoing packet was icmp then the final
@@ -347,7 +346,7 @@ impl TraceRoute {
                     .to_owned();
                 let wrapped_ip_packet = Ipv4Packet::new(&dest_unreachable).unwrap();
                 //println!("{:02x}", wrapped_ip_packet.packet().as_hex());
-                self.analyse_time_exceeded_packet_in(wrapped_ip_packet, &icmp_packet_in, packet_out)
+                self.analyse_icmp_packet_in(wrapped_ip_packet, &icmp_packet_in, packet_out)
             }
             _ => Err(Error::new(ErrorKind::Other, "unidentified packet type")),
         }
@@ -424,58 +423,41 @@ impl TraceRoute {
     }
 
     #[allow(unused_variables)]
-    fn find_next_hop(&mut self) -> io::Result<TraceResult> {
-        // let socket_in = match self.proto {
-        //     TraceProtocol::ICMP => socket_out.try_clone().unwrap(),
-        //     _ => {
-        //         println!("creating incoming socket...");
-        //         self.create_socket(false)
-        //     }
-        // };
-        // try!(socket_in.set_nonblocking(false));
-        // try!(socket_in.set_read_timeout(Some(self.timeout.to_std().unwrap())));
-
+    fn next_hop(&mut self) -> io::Result<TraceResult> {
         loop {
             self.seq_num += 1;
-            //let trace_hops = Vec::new();
             let mut trace_result = TraceResult {
                 error: Err(Error::new(ErrorKind::Other, "-42")),
                 hop: self.ttl,
                 result: Vec::with_capacity(DEFAULT_TRT_COUNT as usize),
             };
-            //let packet_out = self.make_echo_request_packet_out().to_owned();
 
             self.ttl += 1;
             let mut trace_hops = Vec::with_capacity(DEFAULT_TRT_COUNT as usize);
 
-            // After deadline passes, restart the loop to advance the TTL and resend.
             for count in 0..DEFAULT_TRT_COUNT {
                 let socket_out = self.create_socket(true);
                 let ttl = self.set_ttl(&socket_out);
                 self.ident = SRC_BASE_PORT - <u16>::from(rand::random::<u8>());
                 let src = get_sock_addr(&self.af, self.ident);
                 socket_out.bind(&src).unwrap();
-                //println!("{:?}", self.ident);
-                //self.seq_num = rand::random::<u16>();
                 let packet_out = match self.proto {
                     TraceProtocol::ICMP => self.make_icmp_packet_out(),
                     TraceProtocol::UDP => self.make_udp_packet_out(),
                     _ => self.make_icmp_packet_out(),
                 };
-                //let packet_out = icmp_out;
-                println!(
-                    "ttl: {:?}, seq: {:?}, id: {:02x}",
-                    self.ttl,
-                    self.seq_num,
-                    &[self.ident].as_hex()
-                );
+                // println!(
+                //     "ttl: {:?}, seq: {:?}, id: {:02x}",
+                //     self.ttl,
+                //     self.seq_num,
+                //     &[self.ident].as_hex()
+                // );
                 self.dst_addr.set_port(self.seq_num + DST_BASE_PORT);
-                println!("src_port: {:02x}", &[self.dst_addr.port()].as_hex());
+                //println!("src_port: {:02x}", &[self.dst_addr.port()].as_hex());
                 let wrote = try!(socket_out.send_to(&packet_out, &<SockAddr>::from(self.dst_addr)));
                 assert_eq!(wrote, packet_out.len());
                 let start_time = SteadyTime::now();
 
-                //while SteadyTime::now() < start_time + self.timeout {
                 let mut read: Result<(usize, SockAddr, Duration), Error>;
                 let sender: SockAddr;
                 let packet_len: usize;
@@ -485,25 +467,13 @@ impl TraceRoute {
                 while SteadyTime::now() < start_time + self.timeout {
                     let read = match self.socket_in.recv_from(buf_in.as_mut_slice()) {
                         Err(ref err) if err.kind() == ErrorKind::WouldBlock => {
-                            // println!("{:?}", err);
-                            //print!("* seq: {:?} count: {:?}) ", self.seq_num, count);
-                            //trace_hops.push(Err(Error::new(ErrorKind::ConnectionAborted, "*")));
-                            //let ten_millis = std::time::Duration::from_millis(10);
-                            //std::thread::sleep(ten_millis);
-                            //println!("{:?}", self.socket_in.recv_from(buf_in.as_mut_slice()));
                             continue;
                         }
                         Err(e) => {
-                            //trace_hops.push(Err(e));
-                            //return Err(e);
                             println!("error in rcv_from: {:?}", e);
                             Err(e)
                         }
-                        Ok((len, s)) => {
-                            Ok((len, s, SteadyTime::now() - start_time))
-                            //break;
-                        } //println!("*({:?},{:?}) ", self.seq_num, count);
-                          //println!("count: {:?}, {:?} {:}", count, sender, rtt);
+                        Ok((len, s)) => Ok((len, s, SteadyTime::now() - start_time)),
                     };
 
                     let (packet_len, sender, rtt) = match read {
@@ -516,7 +486,6 @@ impl TraceRoute {
                     // The IP packet that wraps the incoming ICMP message.
                     let packet_in = self.unwrap_payload_ip_packet_in(&buf_in);
 
-                    // TODO: unwrapping UDP return packets just doesn't work like this.
                     match packet_in {
                         IcmpPacketIn::V6(icmp_packet_in) => {
                             match self.analyse_v6_payload(&packet_out, &icmp_packet_in) {
@@ -564,7 +533,6 @@ impl TraceRoute {
                                     println!("* wut?");
                                     println!("{:?}", err);
                                     trace_hops.push(Err(Error::new(ErrorKind::Other, "invalid ")));
-                                    //continue;
                                 }
                             }
                         }
@@ -573,7 +541,6 @@ impl TraceRoute {
             }
             trace_result.result = trace_hops;
 
-            //self.result.push(&trace_result);
             return Ok(trace_result);
         }
     }
@@ -587,11 +554,7 @@ impl Iterator for TraceRoute {
             return None;
         }
 
-        let trace_result = self.find_next_hop();
-
-        // if trace_result.error.is_err {
-        //     self.done = true;
-        // }
+        let trace_result = self.next_hop();
 
         Some(trace_result.unwrap())
     }
@@ -614,21 +577,10 @@ pub fn sync_start_with_timeout<'a, T: ToSocketAddrs>(
         _ => (),
     };
 
-    //let first_addr = try!(address.to_socket_addrs());
-
     let socket_in = match address.to_socket_addrs().unwrap().next().unwrap().is_ipv4() {
         true => Socket::new(Domain::ipv4(), Type::raw(), Some(<Protocol>::icmpv4())).unwrap(),
         false => Socket::new(Domain::ipv6(), Type::raw(), Some(<Protocol>::icmpv6())).unwrap(),
     };
-
-    // let socket_in = match AF {
-    //     AddressFamily::V4 => {
-    //         Socket::new(Domain::ipv4(), Type::raw(), Some(<Protocol>::icmpv4())).unwrap()
-    //     }
-    //     AddressFamily::V6 => {
-    //         Socket::new(Domain::ipv6(), Type::raw(), Some(<Protocol>::icmpv6())).unwrap()
-    //     }
-    // };
 
     socket_in
         .set_nonblocking(false)
@@ -655,7 +607,7 @@ pub fn sync_start_with_timeout<'a, T: ToSocketAddrs>(
                             src_addr: src_addr,
                             dst_addr: dst_addr,
                             af: AddressFamily::V4,
-                            proto: TraceProtocol::UDP,
+                            proto: TraceProtocol::ICMP,
                             ttl: 0,
                             ident: rand::random(),
                             seq_num: 0,
