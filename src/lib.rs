@@ -22,8 +22,10 @@ use pnet::packet::icmpv6::{Icmpv6Packet, Icmpv6Types};
 use pnet::packet::icmp::echo_request::MutableEchoRequestPacket;
 use pnet::packet::icmp::echo_reply::EchoReplyPacket;
 use pnet::packet::icmp::time_exceeded::TimeExceededPacket;
+use pnet::packet::udp::{MutableUdpPacket, UdpPacket};
 use pnet::packet::Packet;
 use pnet::packet::icmp::checksum;
+use pnet::packet::udp::{ipv4_checksum, ipv6_checksum};
 use pnet::packet::ipv4::Ipv4Packet;
 use pnet::packet::ipv6::Ipv6Packet;
 use pnet::packet::icmpv6::MutableIcmpv6Packet;
@@ -31,10 +33,11 @@ use pnet::datalink::NetworkInterface;
 
 use dns_lookup::lookup_addr;
 // only used for debig printing packets
-//use hex_slice::AsHex;
+use hex_slice::AsHex;
 
 const MAX_PACKET_SIZE: usize = 4096 + 128;
 const ICMP_HEADER_LEN: usize = 8;
+const UDP_HEADER_LEN: usize = 8;
 const SRC_BASE_PORT: u16 = 20480;
 const DST_BASE_PORT: u16 = 80;
 const DEFAULT_TRT_COUNT: u8 = 3;
@@ -148,7 +151,7 @@ impl TraceRoute {
         }
     }
 
-    fn make_echo_request_packet_out(&self) -> Vec<u8> {
+    fn make_icmp_packet_out(&self) -> Vec<u8> {
         match self.af {
             AddressFamily::V4 => {
                 let icmp_buffer = vec![00u8; ICMP_HEADER_LEN];
@@ -173,7 +176,61 @@ impl TraceRoute {
         }
     }
 
+    fn make_udp_packet_out(&self) -> Vec<u8> {
+        match self.af {
+            AddressFamily::V4 => {
+                let src_ip = self.src_addr
+                    .as_inet()
+                    .expect("invalid source address")
+                    .ip()
+                    .clone();
+                let dst_ip = <SockAddr>::from(self.dst_addr)
+                    .as_inet()
+                    .expect("invalid destination address")
+                    .ip()
+                    .clone();
+                let udp_buffer = vec![00u8; UDP_HEADER_LEN];
+                let mut udp_packet = MutableUdpPacket::owned(udp_buffer).unwrap();
+                udp_packet.set_source(self.ident);
+                udp_packet.set_destination(self.seq_num + DST_BASE_PORT);
+                udp_packet.set_length(0x00);
+                //The `official` udp checksum
+                let udp_checksum = ipv4_checksum(
+                    &UdpPacket::new(&udp_packet.packet()).unwrap(),
+                    src_ip,
+                    dst_ip,
+                );
+                udp_packet.set_checksum(udp_checksum);
+                udp_packet.packet().to_owned()
+            }
+            AddressFamily::V6 => {
+                let src_ip = self.src_addr
+                    .as_inet6()
+                    .expect("invalid source address")
+                    .ip()
+                    .clone();
+                let dst_ip = <SockAddr>::from(self.dst_addr)
+                    .as_inet6()
+                    .expect("invalid destination address")
+                    .ip()
+                    .clone();
+                let udp_buffer = vec![00u8; UDP_HEADER_LEN];
+                let mut udp_packet = MutableUdpPacket::owned(udp_buffer).unwrap();
+                udp_packet.set_source(SRC_BASE_PORT);
+                udp_packet.set_destination(DST_BASE_PORT);
+                let udp_checksum = ipv6_checksum(
+                    &UdpPacket::new(&udp_packet.packet()).unwrap(),
+                    src_ip,
+                    dst_ip,
+                );
+                udp_packet.set_checksum(udp_checksum);
+                udp_packet.packet().to_owned()
+            }
+        }
+    }
+
     fn unwrap_payload_ip_packet_in(&mut self, buf_in: &[u8]) -> IcmpPacketIn {
+        //println!("64b of raw packet in: {:02x}", buf_in[..64].as_hex());
         let packet_in = match self.af {
             AddressFamily::V4 => IcmpPacketIn::V4(Ipv4Packet::owned(buf_in.to_owned()).unwrap()),
             // IPv6 holds IP header of incoming packet in ancillary data, so
@@ -201,10 +258,13 @@ impl TraceRoute {
                     Err(Error::new(ErrorKind::InvalidData, "invalid "))
                 }
             }
-            IcmpTypes::DestinationUnreachable => Err(Error::new(
-                ErrorKind::AddrNotAvailable,
-                "destination unreachable",
-            )),
+            IcmpTypes::DestinationUnreachable => {
+                self.done = true;
+                Err(Error::new(
+                    ErrorKind::AddrNotAvailable,
+                    "destination unreachable",
+                ))
+            }
             IcmpTypes::TimeExceeded => {
                 // `Time Exceeded` packages do not have a identifier or sequence number
                 // They do return up to 576 bytes of the original IP packet
@@ -232,10 +292,38 @@ impl TraceRoute {
                     {
                         Ok(())
                     }
+                    /* Unfortunately, cheap home routers may
+                     * forget to restore the checksum field
+                     * when they are doing NAT. Ignore the
+                     * sequence number if it seems wrong.
+                     */
+                    &TraceProtocol::UDP if wrapped_ip_packet.payload()[..4] == packet_out[..4] => {
+                        println!("checksum invalid - ignoring");
+
+                        print!("packet out {:?}: {:02x}", &self.proto, &packet_out.as_hex());
+                        print!(" -> ");
+                        println!(
+                            "icmp payload: {:02x}",
+                            &wrapped_ip_packet.payload()[..8].as_hex()
+                        );
+                        println!(
+                            "64b of icmp in packet: {:02x}",
+                            &icmp_packet_in.packet()[..8].as_hex()
+                        );
+
+                        Ok(())
+                    }
                     _ => {
-                        println!("{:?}", &wrapped_ip_packet.payload()[..64]);
-                        println!("{:?}", &packet_out);
-                        println!("{:?}", &icmp_packet_in.packet()[..64]);
+                        print!("packet out {:?}: {:02x}", &self.proto, &packet_out.as_hex());
+                        print!(" -> ");
+                        println!(
+                            "icmp payload: {:02x}",
+                            &wrapped_ip_packet.payload()[..64].as_hex()
+                        );
+                        println!(
+                            "64b of icmp in packet: {:02x}",
+                            &icmp_packet_in.packet()[..64].as_hex()
+                        );
                         Err(Error::new(
                             ErrorKind::InvalidData,
                             "invalid TimeExceeded packet",
@@ -348,15 +436,21 @@ impl TraceRoute {
 
             // After deadline passes, restart the loop to advance the TTL and resend.
             for count in 0..DEFAULT_TRT_COUNT {
-                self.ident = rand::random();
+                self.ident = SRC_BASE_PORT - <u16>::from(rand::random::<u8>());
                 //println!("{:?}", self.ident);
                 //self.seq_num = rand::random::<u16>();
-                let icmp_out = self.make_echo_request_packet_out();
-                let packet_out = icmp_out;
+                let packet_out = match self.proto {
+                    TraceProtocol::ICMP => self.make_icmp_packet_out(),
+                    TraceProtocol::UDP => self.make_udp_packet_out(),
+                    _ => self.make_icmp_packet_out(),
+                };
+                //let packet_out = icmp_out;
                 println!(
-                    "ttl: {:?}, seq: {:?}, id: {:?}",
-                    self.ttl, self.seq_num, self.ident
+                    "ttl: {:?}, seq: {:?}, id: {:02x}",
+                    self.ttl, self.seq_num, &[self.ident].as_hex()
                 );
+                self.dst_addr.set_port(self.seq_num + DST_BASE_PORT);
+                println!("src_port: {:02x}", &[self.dst_addr.port()].as_hex());
                 let wrote = try!(socket_out.send_to(&packet_out, &<SockAddr>::from(self.dst_addr)));
                 assert_eq!(wrote, packet_out.len());
                 let start_time = SteadyTime::now();
