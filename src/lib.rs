@@ -33,7 +33,7 @@ use pnet::packet::icmpv6::MutableIcmpv6Packet;
 use pnet::datalink::NetworkInterface;
 
 use dns_lookup::lookup_addr;
-// only used for debig printing packets
+// only used for debug printing packets
 use hex_slice::AsHex;
 
 const MAX_PACKET_SIZE: usize = 4096 + 128;
@@ -424,125 +424,132 @@ impl TraceRoute {
 
     #[allow(unused_variables)]
     fn next_hop(&mut self) -> io::Result<TraceResult> {
-        loop {
-            self.seq_num += 1;
-            let mut trace_result = TraceResult {
-                error: Err(Error::new(ErrorKind::Other, "-42")),
-                hop: self.ttl,
-                result: Vec::with_capacity(DEFAULT_TRT_COUNT as usize),
+        self.seq_num += 1;
+        let mut trace_result = TraceResult {
+            error: Err(Error::new(ErrorKind::Other, "-42")),
+            hop: self.ttl,
+            result: Vec::with_capacity(DEFAULT_TRT_COUNT as usize),
+        };
+
+        self.ttl += 1;
+        let mut trace_hops = Vec::with_capacity(DEFAULT_TRT_COUNT as usize);
+
+        for count in 0..DEFAULT_TRT_COUNT {
+            let socket_out = self.create_socket(true);
+            let ttl = self.set_ttl(&socket_out);
+            self.ident = SRC_BASE_PORT - <u16>::from(rand::random::<u8>());
+            let src = get_sock_addr(&self.af, self.ident);
+            socket_out.bind(&src).unwrap();
+            let packet_out = match self.proto {
+                TraceProtocol::ICMP => self.make_icmp_packet_out(),
+                TraceProtocol::UDP => self.make_udp_packet_out(),
+                _ => self.make_icmp_packet_out(),
             };
+            // println!(
+            //     "ttl: {:?}, seq: {:?}, id: {:02x}",
+            //     self.ttl,
+            //     self.seq_num,
+            //     &[self.ident].as_hex()
+            // );
+            self.dst_addr.set_port(self.seq_num + DST_BASE_PORT);
+            //println!("src_port: {:02x}", &[self.dst_addr.port()].as_hex());
+            let wrote = try!(socket_out.send_to(&packet_out, &<SockAddr>::from(self.dst_addr)));
+            assert_eq!(wrote, packet_out.len());
+            let start_time = SteadyTime::now();
 
-            self.ttl += 1;
-            let mut trace_hops = Vec::with_capacity(DEFAULT_TRT_COUNT as usize);
+            let mut read: Result<(usize, SockAddr, Duration), Error>;
+            let sender: SockAddr;
+            let packet_len: usize;
+            let rtt: Duration;
 
-            for count in 0..DEFAULT_TRT_COUNT {
-                let socket_out = self.create_socket(true);
-                let ttl = self.set_ttl(&socket_out);
-                self.ident = SRC_BASE_PORT - <u16>::from(rand::random::<u8>());
-                let src = get_sock_addr(&self.af, self.ident);
-                socket_out.bind(&src).unwrap();
-                let packet_out = match self.proto {
-                    TraceProtocol::ICMP => self.make_icmp_packet_out(),
-                    TraceProtocol::UDP => self.make_udp_packet_out(),
-                    _ => self.make_icmp_packet_out(),
+            let mut buf_in = vec![0; MAX_PACKET_SIZE];
+
+            // If hop is not overwritten with a TraceHop struct within the while loop below
+            // then the result will be a timed-out error
+            let mut hop: io::Result<TraceHop> = Err(Error::new(ErrorKind::TimedOut, "*"));
+
+            while SteadyTime::now() < start_time + self.timeout {
+                let read = match self.socket_in.recv_from(buf_in.as_mut_slice()) {
+                    Err(ref err) if err.kind() == ErrorKind::WouldBlock => {
+                        continue;
+                    }
+                    Err(e) => {
+                        println!("error in rcv_from: {:?}", e);
+                        Err(e)
+                    }
+                    Ok((len, s)) => Ok((len, s, SteadyTime::now() - start_time)),
                 };
-                // println!(
-                //     "ttl: {:?}, seq: {:?}, id: {:02x}",
-                //     self.ttl,
-                //     self.seq_num,
-                //     &[self.ident].as_hex()
-                // );
-                self.dst_addr.set_port(self.seq_num + DST_BASE_PORT);
-                //println!("src_port: {:02x}", &[self.dst_addr.port()].as_hex());
-                let wrote = try!(socket_out.send_to(&packet_out, &<SockAddr>::from(self.dst_addr)));
-                assert_eq!(wrote, packet_out.len());
-                let start_time = SteadyTime::now();
 
-                let mut read: Result<(usize, SockAddr, Duration), Error>;
-                let sender: SockAddr;
-                let packet_len: usize;
-                let rtt: Duration;
+                let (packet_len, sender, rtt) = match read {
+                    Ok(recv) => recv,
+                    _ => {
+                        continue;
+                    }
+                };
 
-                let mut buf_in = vec![0; MAX_PACKET_SIZE];
-                while SteadyTime::now() < start_time + self.timeout {
-                    let read = match self.socket_in.recv_from(buf_in.as_mut_slice()) {
-                        Err(ref err) if err.kind() == ErrorKind::WouldBlock => {
-                            continue;
-                        }
-                        Err(e) => {
-                            println!("error in rcv_from: {:?}", e);
-                            Err(e)
-                        }
-                        Ok((len, s)) => Ok((len, s, SteadyTime::now() - start_time)),
-                    };
+                // The IP packet that wraps the incoming ICMP message.
+                let packet_in = self.unwrap_payload_ip_packet_in(&buf_in);
 
-                    let (packet_len, sender, rtt) = match read {
-                        Ok(recv) => recv,
-                        _ => {
-                            continue;
-                        }
-                    };
-
-                    // The IP packet that wraps the incoming ICMP message.
-                    let packet_in = self.unwrap_payload_ip_packet_in(&buf_in);
-
-                    match packet_in {
-                        IcmpPacketIn::V6(icmp_packet_in) => {
-                            match self.analyse_v6_payload(&packet_out, &icmp_packet_in) {
-                                Ok(()) => {
-                                    let host = SocketAddr::V6(sender.as_inet6().unwrap());
-                                    let hop = TraceHop {
-                                        ttl: self.ttl,
-                                        size: packet_len,
-                                        host: host,
-                                        hop_name: lookup_addr(&host.ip()).unwrap(),
-                                        rtt: rtt,
-                                    };
-                                    trace_hops.push(Ok(hop))
-                                }
-                                Err(ref err)
-                                    if err.kind() == ErrorKind::InvalidData
-                                        || err.kind() == ErrorKind::Other =>
-                                {
-                                    println!("*");
-                                    println!("{:?}", err);
-                                    trace_hops
-                                        .push(Err(Error::new(ErrorKind::InvalidData, "invalid ")));
-                                    continue;
-                                }
-                                Err(e) => trace_hops.push(Err(e)),
+                match packet_in {
+                    IcmpPacketIn::V6(icmp_packet_in) => {
+                        match self.analyse_v6_payload(&packet_out, &icmp_packet_in) {
+                            Ok(()) => {
+                                let host = SocketAddr::V6(sender.as_inet6().unwrap());
+                                hop = Ok(TraceHop {
+                                    ttl: self.ttl,
+                                    size: packet_len,
+                                    host: host,
+                                    hop_name: lookup_addr(&host.ip()).unwrap(),
+                                    rtt: rtt,
+                                });
+                                // we've got a positive result,
+                                // so break out of the while loop
+                                break;
                             }
-                        }
-                        IcmpPacketIn::V4(ip_packet_in) => {
-                            let ip_payload = ip_packet_in.payload();
-                            let icmp_packet_in = IcmpPacket::new(&ip_packet_in.payload()).unwrap();
-                            match self.analyse_v4_payload(&packet_out, &icmp_packet_in, &ip_payload)
+                            Err(ref err)
+                                if err.kind() == ErrorKind::InvalidData
+                                    || err.kind() == ErrorKind::Other =>
                             {
-                                Ok(()) => {
-                                    let host = SocketAddr::V4(sender.as_inet().unwrap());
-                                    let hop = TraceHop {
-                                        ttl: self.ttl,
-                                        size: packet_len,
-                                        host: host,
-                                        hop_name: lookup_addr(&host.ip()).unwrap(),
-                                        rtt: rtt,
-                                    };
-                                    trace_hops.push(Ok(hop))
-                                }
-                                err => {
-                                    println!("* wut?");
-                                    println!("{:?}", err);
-                                    trace_hops.push(Err(Error::new(ErrorKind::Other, "invalid ")));
-                                }
+                                println!("*");
+                                println!("{:?}", err);
+                                hop = Err(Error::new(ErrorKind::InvalidData, "*"));
+                                // this packet might not be meant for this tracehop,
+                                // so DO NOT break the while loop and listen for some
+                                // other packet that might come in.
+                                continue;
+                            }
+                            Err(e) => trace_hops.push(Err(e)),
+                        }
+                    }
+                    IcmpPacketIn::V4(ip_packet_in) => {
+                        let ip_payload = ip_packet_in.payload();
+                        let icmp_packet_in = IcmpPacket::new(&ip_packet_in.payload()).unwrap();
+                        match self.analyse_v4_payload(&packet_out, &icmp_packet_in, &ip_payload) {
+                            Ok(()) => {
+                                let host = SocketAddr::V4(sender.as_inet().unwrap());
+                                hop = Ok(TraceHop {
+                                    ttl: self.ttl,
+                                    size: packet_len,
+                                    host: host,
+                                    hop_name: lookup_addr(&host.ip()).unwrap(),
+                                    rtt: rtt,
+                                });
+                                break;
+                            }
+                            err => {
+                                println!("* wut?");
+                                println!("{:?}", err);
+                                hop = Err(Error::new(ErrorKind::Other, "*"));
+                                continue;
                             }
                         }
                     }
                 }
             }
-            trace_result.result = trace_hops;
-
-            return Ok(trace_result);
+            trace_hops.push(hop);
         }
+        trace_result.result = trace_hops;
+        Ok(trace_result)
     }
 }
 
@@ -607,7 +614,7 @@ pub fn sync_start_with_timeout<'a, T: ToSocketAddrs>(
                             src_addr: src_addr,
                             dst_addr: dst_addr,
                             af: AddressFamily::V4,
-                            proto: TraceProtocol::ICMP,
+                            proto: TraceProtocol::UDP,
                             ttl: 0,
                             ident: rand::random(),
                             seq_num: 0,
