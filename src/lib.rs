@@ -75,8 +75,8 @@ pub struct TraceRoute {
 
 #[derive(Debug)]
 pub struct TraceResult {
-    error: io::Result<Error>,
-    hop: u32,
+    pub error: io::Result<Error>,
+    pub hop: u8,
     pub result: Vec<io::Result<TraceHop>>,
 }
 
@@ -94,7 +94,7 @@ pub struct TraceHop {
     /// The resolved hostname
     pub hop_name: String,
     /// Time-to-live for this hop
-    pub ttl: u32,
+    pub ttl: u8,
     /// Round-trip-time for this packet
     pub rtt: Duration,
     /// Size of the reply
@@ -124,6 +124,7 @@ fn get_sock_addr<'a>(af: &AddressFamily, port: u16) -> SockAddr {
 }
 
 impl TraceRoute {
+    // TODO: refactor to be only used for OUTGOING socket.
     fn create_socket(&self, out: bool) -> Socket {
         let af = &self.af;
         let protocol = match (out, &self.proto) {
@@ -230,15 +231,23 @@ impl TraceRoute {
         }
     }
 
-    fn unwrap_payload_ip_packet_in(&mut self, buf_in: &[u8]) -> IcmpPacketIn {
+    fn unwrap_payload_ip_packet_in(&mut self, buf_in: &[u8]) -> (IcmpPacketIn, u8) {
         //println!("64b of raw packet in: {:02x}", buf_in[..64].as_hex());
-        let packet_in = match self.af {
-            AddressFamily::V4 => IcmpPacketIn::V4(Ipv4Packet::owned(buf_in.to_owned()).unwrap()),
+        let ttl_in: u8;
+        match self.af {
+            AddressFamily::V4 => {
+                let pack = Ipv4Packet::owned(buf_in.to_owned()).unwrap();
+                ttl_in = pack.get_ttl();
+                (IcmpPacketIn::V4(pack), ttl_in)
+            }
             // IPv6 holds IP header of incoming packet in ancillary data, so
             // we unpack the ICMPv6 packet directly here.
-            AddressFamily::V6 => IcmpPacketIn::V6(Icmpv6Packet::owned(buf_in.to_owned()).unwrap()),
-        };
-        packet_in
+            AddressFamily::V6 => {
+                let icmp_pack = Icmpv6Packet::owned(buf_in.to_owned()).unwrap();
+                let ip_pack = Ipv6Packet::owned(buf_in.to_owned()).unwrap();
+                (IcmpPacketIn::V6(icmp_pack), ip_pack.get_hop_limit())
+            }
+        }
     }
 
     fn analyse_icmp_packet_in(
@@ -427,7 +436,7 @@ impl TraceRoute {
         self.seq_num += 1;
         let mut trace_result = TraceResult {
             error: Err(Error::new(ErrorKind::Other, "-42")),
-            hop: self.ttl,
+            hop: self.seq_num as u8,
             result: Vec::with_capacity(DEFAULT_TRT_COUNT as usize),
         };
 
@@ -488,7 +497,7 @@ impl TraceRoute {
                 };
 
                 // The IP packet that wraps the incoming ICMP message.
-                let packet_in = self.unwrap_payload_ip_packet_in(&buf_in);
+                let (packet_in, ttl_in) = self.unwrap_payload_ip_packet_in(&buf_in);
 
                 match packet_in {
                     IcmpPacketIn::V6(icmp_packet_in) => {
@@ -496,7 +505,7 @@ impl TraceRoute {
                             Ok(()) => {
                                 let host = SocketAddr::V6(sender.as_inet6().unwrap());
                                 hop = Ok(TraceHop {
-                                    ttl: self.ttl,
+                                    ttl: ttl_in,
                                     size: packet_len,
                                     host: host,
                                     hop_name: lookup_addr(&host.ip()).unwrap(),
@@ -528,7 +537,7 @@ impl TraceRoute {
                             Ok(()) => {
                                 let host = SocketAddr::V4(sender.as_inet().unwrap());
                                 hop = Ok(TraceHop {
-                                    ttl: self.ttl,
+                                    ttl: ttl_in,
                                     size: packet_len,
                                     host: host,
                                     hop_name: lookup_addr(&host.ip()).unwrap(),

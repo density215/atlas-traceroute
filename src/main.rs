@@ -10,6 +10,7 @@ fn main() {
     println!("dst_name: {}", env::args().nth(1).unwrap());
     
     for result_ip in traceroute::start(addr).unwrap() {
+        println!("{:?}",result_ip.hop);
         for hop in result_ip.result {
             //let hop = result_ip; // .unwrap();
             match hop {
@@ -24,6 +25,7 @@ fn main() {
                 Err(err) => println!("{:?}", err)
             }
         }
+        println!("--")
         // println!(
         //     "{} {} ({}) {}B {}ms",
         //     hop.ttl,
