@@ -252,32 +252,32 @@ impl TraceRoute {
 
     fn analyse_icmp_packet_in(
         &self,
-        wrapped_ip_packet: Ipv4Packet,
-        icmp_packet_in: &IcmpPacket,
+        wrapped_ip_packet: &[u8],
+        icmp_packet_in: &[u8],
         packet_out: &[u8],
     ) -> Result<(), Error> {
         // We don't have any ICMP header data right now
         // So we're only using the last 4 bytes in the payload to compare.
         match &self.proto {
-            &TraceProtocol::ICMP if wrapped_ip_packet.payload()[4..8] == packet_out[4..8] => Ok(()),
-            &TraceProtocol::UDP if wrapped_ip_packet.payload()[8..16] == packet_out[..8] => Ok(()),
+            &TraceProtocol::ICMP if wrapped_ip_packet[4..8] == packet_out[4..8] => Ok(()),
+            &TraceProtocol::UDP if wrapped_ip_packet[8..16] == packet_out[..8] => Ok(()),
             /* Unfortunately, cheap home routers may
              * forget to restore the checksum field
              * when they are doing NAT. Ignore the
              * sequence number if it seems wrong.
              */
-            &TraceProtocol::UDP if wrapped_ip_packet.payload()[..4] == packet_out[..4] => {
+            &TraceProtocol::UDP if wrapped_ip_packet[..4] == packet_out[..4] => {
                 println!("checksum invalid - ignoring");
 
                 print!("packet out {:?}: {:02x}", &self.proto, &packet_out.as_hex());
                 print!(" -> ");
                 println!(
                     "icmp payload: {:02x}",
-                    &wrapped_ip_packet.payload()[..8].as_hex()
+                    &wrapped_ip_packet[..8].as_hex()
                 );
                 println!(
                     "64b of icmp in packet: {:02x}",
-                    &icmp_packet_in.packet()[..8].as_hex()
+                    &icmp_packet_in[..8].as_hex()
                 );
 
                 Ok(())
@@ -287,11 +287,11 @@ impl TraceRoute {
                 print!(" -> ");
                 println!(
                     "icmp payload: {:02x}",
-                    &wrapped_ip_packet.payload()[..64].as_hex()
+                    &wrapped_ip_packet[..64].as_hex()
                 );
                 println!(
                     "64b of icmp in packet: {:02x}",
-                    &icmp_packet_in.packet()[..64].as_hex()
+                    &icmp_packet_in[..64].as_hex()
                 );
                 Err(Error::new(
                     ErrorKind::InvalidData,
@@ -327,7 +327,7 @@ impl TraceRoute {
 
                 // We don't have any ICMP data right now
                 // So we're only using the last 4 bytes in the payload to compare.
-                self.analyse_icmp_packet_in(wrapped_ip_packet, &icmp_packet_in, packet_out)
+                self.analyse_icmp_packet_in(wrapped_ip_packet.payload(), &icmp_packet_in.packet(), packet_out)
             }
 
             // If the outgoing packet was icmp then the final
@@ -355,7 +355,7 @@ impl TraceRoute {
                     .to_owned();
                 let wrapped_ip_packet = Ipv4Packet::new(&dest_unreachable).unwrap();
                 //println!("{:02x}", wrapped_ip_packet.packet().as_hex());
-                self.analyse_icmp_packet_in(wrapped_ip_packet, &icmp_packet_in, packet_out)
+                self.analyse_icmp_packet_in(wrapped_ip_packet.payload(), &icmp_packet_in.packet(), packet_out)
             }
             _ => Err(Error::new(ErrorKind::Other, "unidentified packet type")),
         }
@@ -394,19 +394,7 @@ impl TraceRoute {
                 }
                 let wrapped_ip_packet = Ipv6Packet::new(&icmp_packet_in.payload()).unwrap();
                 //println!("unwrap ip: {:?}", wrapped_ip_packet);
-                // We don't have any ICMP data right now
-                // So we're only using the last 4 bytes in the payload to compare.
-                if wrapped_ip_packet.payload()[4..8] == packet_out[4..8] {
-                    Ok(())
-                } else {
-                    println!("{:?}", &wrapped_ip_packet.payload());
-                    println!("{:?}", &packet_out);
-                    println!("{:?}", &icmp_packet_in.packet()[..64]);
-                    Err(Error::new(
-                        ErrorKind::InvalidData,
-                        "invalid TimeExceeded packet",
-                    ))
-                }
+                self.analyse_icmp_packet_in(wrapped_ip_packet.payload(), &icmp_packet_in.packet(), packet_out)
             }
             _ => {
                 println!("{:?}", icmp_packet_in.get_icmpv6_type());
