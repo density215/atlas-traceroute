@@ -119,8 +119,6 @@ fn get_sock_addr<'a>(af: &AddressFamily, port: u16) -> SockAddr {
         .nth(0)
         .unwrap();
 
-    println!("src_addr: {:?}, port: {:02x}", interface, &[port].as_hex());
-
     match interface {
         IpAddr::V4(addrv4) => <SockAddr>::from(SocketAddrV4::new(addrv4, port)),
         IpAddr::V6(addrv6) => <SockAddr>::from(SocketAddrV6::new(addrv6, port, 0, 0x0)),
@@ -517,6 +515,7 @@ impl TraceRoute {
         let socket_out = self.create_socket(true);
         socket_out.set_reuse_address(true).unwrap();
         let src = get_sock_addr(&self.af, self.ident);
+
         //socket_out.bind(&src).unwrap();
         socket_out.set_nonblocking(true).unwrap();
 
@@ -702,23 +701,38 @@ pub fn sync_start_with_timeout<'a, T: ToSocketAddrs>(
     //     .expect("Cannot set read timeout on socket");
 
     let mut addr_iter = try!(address.to_socket_addrs());
+    let src_addr;
+    let af;
+
     match addr_iter.next() {
         None => Err(Error::new(
             ErrorKind::InvalidInput,
             "Could not interpret address",
         )),
         Some(mut dst_addr) => {
+            match &dst_addr.is_ipv4() {
+                true => {
+                    src_addr = get_sock_addr(&AddressFamily::V4, SRC_BASE_PORT);
+                    af = AddressFamily::V4;
+                    dst_addr.set_port(DST_BASE_PORT)
+                }
+                false => {
+                    src_addr = get_sock_addr(&AddressFamily::V6, SRC_BASE_PORT);
+                    af = AddressFamily::V6;
+                    dst_addr.set_port(DST_BASE_PORT)
+                }
+            };
+
+            println!("af: IP{:?}", af);
+            println!("src_addr: {:?}", src_addr);
             println!("dst_addr: {:?}", dst_addr);
             println!("timestamp: {:?}", time::get_time().sec);
+
             Ok({
-                match dst_addr.is_ipv4() {
-                    true => {
-                        let src_addr = get_sock_addr(&AddressFamily::V4, SRC_BASE_PORT);
-                        dst_addr.set_port(DST_BASE_PORT);
                         TraceRoute {
                             src_addr: src_addr,
                             dst_addr: dst_addr,
-                            af: AddressFamily::V4,
+                    af: af,
                             proto: TraceProtocol::UDP,
                             ttl: 0,
                             ident: rand::random(),
@@ -728,25 +742,6 @@ pub fn sync_start_with_timeout<'a, T: ToSocketAddrs>(
                             result: Vec::new(),
                             socket_in: socket_in,
                         }
-                    }
-                    false => {
-                        let src_addr = get_sock_addr(&AddressFamily::V6, SRC_BASE_PORT);
-                        dst_addr.set_port(DST_BASE_PORT);
-                        TraceRoute {
-                            src_addr: src_addr,
-                            dst_addr: dst_addr,
-                            af: AddressFamily::V6,
-                            proto: TraceProtocol::UDP,
-                            ttl: 0,
-                            ident: rand::random(),
-                            seq_num: 0,
-                            done: false,
-                            timeout: timeout,
-                            result: Vec::new(),
-                            socket_in: socket_in,
-                        }
-                    }
-                }
             })
         }
     }
