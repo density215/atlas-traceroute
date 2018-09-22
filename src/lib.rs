@@ -111,8 +111,11 @@ fn get_sock_addr<'a>(af: &AddressFamily, port: u16) -> SockAddr {
         .into_iter()
         .filter(|iface: &NetworkInterface| iface.ips.len() > 0)
         .flat_map(|i| i.ips)
-        .filter(filter_public_if_for_af)
-        .map(|a| a.ip())
+        // select the appropriate interface for the requested address family.
+        .filter(|addr| match af {
+            &AddressFamily::V4 => addr.is_ipv4() && !addr.ip().is_loopback(),
+            &AddressFamily::V6 => addr.is_ipv6() && addr.ip().is_global(),
+        }).map(|a| a.ip())
         .nth(0)
         .unwrap();
     //println!("src_addr: {:?}, port: {:02x}", interface, &[port].as_hex());
@@ -222,8 +225,8 @@ impl TraceRoute {
                 udp_packet.set_destination(DST_BASE_PORT);
                 let udp_checksum = ipv6_checksum(
                     &UdpPacket::new(&udp_packet.packet()).unwrap(),
-                    src_ip,
-                    dst_ip,
+                    &src_ip,
+                    &dst_ip,
                 );
                 udp_packet.set_checksum(udp_checksum);
                 udp_packet.packet().to_owned()
@@ -413,8 +416,8 @@ impl TraceRoute {
                 socket.ttl()
             }
             AddressFamily::V6 => {
-                try!(socket.set_ipv6_unicast_hops(self.ttl));
-                socket.ipv6_unicast_hops()
+                try!(socket.set_unicast_hops_v6(self.ttl));
+                socket.unicast_hops_v6()
             }
         }
     }

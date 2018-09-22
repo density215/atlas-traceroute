@@ -8,8 +8,10 @@ repository = "https://github.com/density215/atlas-traceroute"
 keywords = ["traceroute", "ripe atlas"]
 
 [dependencies]
-socket2 = { path = "socket2-rs" }
+#socket2 = { path = "socket2-rs" }
+socket2 = "0.3.8"
 pnet = { path = "libpnet" }
+#pnet = "0.21.0"
 ipnetwork = "0.12.7"
 rand = "0.3"
 time = "0.1"
