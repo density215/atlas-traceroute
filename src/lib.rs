@@ -13,24 +13,26 @@ use std::iter::Iterator;
 use std::io::{self, Error, ErrorKind};
 use std::net::{IpAddr, SocketAddrV4};
 use std::net::{SocketAddr, SocketAddrV6, ToSocketAddrs};
-use ipnetwork::IpNetwork;
 
-use time::{Duration, SteadyTime};
-use socket2::{Domain, Protocol, SockAddr, Socket, Type};
-use pnet::packet::icmp::{IcmpPacket, IcmpTypes};
-use pnet::packet::icmpv6::{Icmpv6Packet, Icmpv6Types};
-use pnet::packet::icmp::echo_request::MutableEchoRequestPacket;
-use pnet::packet::icmp::echo_reply::EchoReplyPacket;
-use pnet::packet::icmp::time_exceeded::TimeExceededPacket;
-use pnet::packet::icmp::destination_unreachable::DestinationUnreachablePacket;
-use pnet::packet::udp::{MutableUdpPacket, UdpPacket};
-use pnet::packet::Packet;
+use pnet::datalink::NetworkInterface;
 use pnet::packet::icmp::checksum;
-use pnet::packet::udp::{ipv4_checksum, ipv6_checksum};
+use pnet::packet::icmp::destination_unreachable::DestinationUnreachablePacket;
+use pnet::packet::icmp::echo_reply::EchoReplyPacket;
+use pnet::packet::icmp::echo_request::MutableEchoRequestPacket;
+use pnet::packet::icmp::time_exceeded::TimeExceededPacket;
+use pnet::packet::icmp::{IcmpPacket, IcmpTypes};
+use pnet::packet::icmpv6::MutableIcmpv6Packet;
+use pnet::packet::icmpv6::{Icmpv6Packet, Icmpv6Types};
 use pnet::packet::ipv4::Ipv4Packet;
 use pnet::packet::ipv6::Ipv6Packet;
-use pnet::packet::icmpv6::MutableIcmpv6Packet;
-use pnet::datalink::NetworkInterface;
+use pnet::packet::tcp::ipv4_checksum as tcp_ipv4_checksum;
+use pnet::packet::tcp::TcpFlags::SYN;
+use pnet::packet::tcp::{ipv6_checksum as tcp_ipv6_checksum, MutableTcpPacket, TcpPacket};
+use pnet::packet::udp::{ipv4_checksum, ipv6_checksum};
+use pnet::packet::udp::{MutableUdpPacket, UdpPacket};
+use pnet::packet::Packet;
+use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+use time::{Duration, SteadyTime};
 
 use dns_lookup::lookup_addr;
 // only used for debug printing packets
@@ -41,7 +43,9 @@ const ICMP_HEADER_LEN: usize = 8;
 const UDP_HEADER_LEN: usize = 8;
 const SRC_BASE_PORT: u16 = 0x5000;
 const DST_BASE_PORT: u16 = 0x8000 + 666;
+const DEFAULT_TCP_DEST_PORT: u16 = 0x50; // port 80, actually a UI default in Atlas.
 const DEFAULT_TRT_COUNT: u8 = 3;
+const PACKET_IN_TIMEOUT: i64 = 1;
 
 #[derive(Debug)]
 enum AddressFamily {
@@ -144,13 +148,25 @@ impl TraceRoute {
             (false, _) => Type::raw(),
             (true, &TraceProtocol::ICMP) => Type::raw(),
             (true, &TraceProtocol::UDP) => Type::dgram(),
-            (true, &TraceProtocol::TCP) => Type::dgram(),
+            (true, &TraceProtocol::TCP) => Type::raw(),
         };
 
-        match af {
+        let socket_out = match af {
             &AddressFamily::V4 => Socket::new(Domain::ipv4(), sock_type, protocol).unwrap(),
             &AddressFamily::V6 => Socket::new(Domain::ipv6(), sock_type, protocol).unwrap(),
-        }
+        };
+        socket_out.set_reuse_address(true).unwrap();
+        //println!("{:?}", self.src_addr);
+        //socket_out.bind(&self.src_addr).unwrap();
+        //let dst_addr = <SockAddr>::from(self.dst_addr);
+        //socket_out.connect(&dst_addr).unwrap();
+        socket_out
+            .set_nonblocking(true)
+            .expect("Cannot set socket to blocking mode");
+        // socket_out
+        //     .set_read_timeout(Some(Duration::seconds(PACKET_IN_TIMEOUT).to_std().unwrap()))
+        //     .expect("Cannot set read timeout on socket");
+        socket_out
     }
 
     fn make_icmp_packet_out(&self) -> Vec<u8> {
@@ -181,7 +197,8 @@ impl TraceRoute {
     fn make_udp_packet_out(&self) -> Vec<u8> {
         match self.af {
             AddressFamily::V4 => {
-                let src_ip = self.src_addr
+                let src_ip = self
+                    .src_addr
                     .as_inet()
                     .expect("invalid source address")
                     .ip()
@@ -199,14 +216,73 @@ impl TraceRoute {
                 //The `official` udp checksum
                 let udp_checksum = ipv4_checksum(
                     &UdpPacket::new(&udp_packet.packet()).unwrap(),
-                    src_ip,
-                    dst_ip,
+                    &src_ip,
+                    &dst_ip,
                 );
                 udp_packet.set_checksum(udp_checksum);
                 udp_packet.packet().to_owned()
             }
             AddressFamily::V6 => {
-                let src_ip = self.src_addr
+                let src_ip = self
+                    .src_addr
+                    .as_inet6()
+                    .expect("invalid source address")
+                    .ip()
+                    .clone();
+                let dst_ip = <SockAddr>::from(self.dst_addr)
+                    .as_inet6()
+                    .expect("invalid destination address")
+                    .ip()
+                    .clone();
+                let udp_buffer = vec![00u8; UDP_HEADER_LEN];
+                let mut udp_packet = MutableUdpPacket::owned(udp_buffer).unwrap();
+                udp_packet.set_source(SRC_BASE_PORT);
+                udp_packet.set_destination(DST_BASE_PORT);
+                let udp_checksum = ipv6_checksum(
+                    &UdpPacket::new(&udp_packet.packet()).unwrap(),
+                    &src_ip,
+                    &dst_ip,
+                );
+                udp_packet.set_checksum(udp_checksum);
+                udp_packet.packet().to_owned()
+            }
+        }
+    }
+
+    fn make_tcp_packet_out(&self) -> Vec<u8> {
+        match self.af {
+            AddressFamily::V4 => {
+                let src_ip = self
+                    .src_addr
+                    .as_inet()
+                    .expect("invalid source address")
+                    .ip()
+                    .clone();
+                let dst_ip = <SockAddr>::from(self.dst_addr)
+                    .as_inet()
+                    .expect("invalid destination address")
+                    .ip()
+                    .clone();
+                // TODO: this stuff no work. with header length and shit.
+                let tcp_buffer = vec![00u8; 40];
+                let mut tcp_packet = MutableTcpPacket::owned(tcp_buffer).unwrap();
+                tcp_packet.set_data_offset(5);
+                tcp_packet.set_flags(SYN);
+                tcp_packet.set_source(SRC_BASE_PORT);
+                tcp_packet.set_destination(DEFAULT_TCP_DEST_PORT);
+                //tcp_packet.packet_size(0x00);
+                //The `official` tcp checksum
+                let tcp_checksum = tcp_ipv4_checksum(
+                    &TcpPacket::new(&tcp_packet.packet()).unwrap(),
+                    &src_ip,
+                    &dst_ip,
+                );
+                tcp_packet.set_checksum(tcp_checksum);
+                tcp_packet.packet().to_owned()
+            }
+            AddressFamily::V6 => {
+                let src_ip = self
+                    .src_addr
                     .as_inet6()
                     .expect("invalid source address")
                     .ip()
@@ -271,10 +347,7 @@ impl TraceRoute {
 
                 print!("packet out {:?}: {:02x}", &self.proto, &packet_out.as_hex());
                 print!(" -> ");
-                println!(
-                    "icmp payload: {:02x}",
-                    &wrapped_ip_packet[..8].as_hex()
-                );
+                println!("icmp payload: {:02x}", &wrapped_ip_packet[..8].as_hex());
                 println!(
                     "64b of icmp in packet: {:02x}",
                     &icmp_packet_in[..8].as_hex()
@@ -282,13 +355,12 @@ impl TraceRoute {
 
                 Ok(())
             }
+            &TraceProtocol::UDP if icmp_packet_in[28..36] == wrapped_ip_packet[..8] => Ok(()),
+            &TraceProtocol::TCP if wrapped_ip_packet[..12] == packet_out[..12] => Ok(()),
             _ => {
                 print!("packet out {:?}: {:02x}", &self.proto, &packet_out.as_hex());
                 print!(" -> ");
-                println!(
-                    "icmp payload: {:02x}",
-                    &wrapped_ip_packet[..64].as_hex()
-                );
+                println!("icmp payload: {:02x}", &wrapped_ip_packet[..64].as_hex());
                 println!(
                     "64b of icmp in packet: {:02x}",
                     &icmp_packet_in[..64].as_hex()
@@ -327,7 +399,11 @@ impl TraceRoute {
 
                 // We don't have any ICMP data right now
                 // So we're only using the last 4 bytes in the payload to compare.
-                self.analyse_icmp_packet_in(wrapped_ip_packet.payload(), &icmp_packet_in.packet(), packet_out)
+                self.analyse_icmp_packet_in(
+                    wrapped_ip_packet.payload(),
+                    &icmp_packet_in.packet(),
+                    packet_out,
+                )
             }
 
             // If the outgoing packet was icmp then the final
@@ -345,7 +421,7 @@ impl TraceRoute {
             }
 
             // UDP and TCP packets that were send out should get these as the final answer,
-            // that is, only if the requested server does not listen on the destiation port!
+            // that is, only if the requested server does not listen on the destination port!
             IcmpTypes::DestinationUnreachable => {
                 self.done = true;
 
@@ -355,7 +431,11 @@ impl TraceRoute {
                     .to_owned();
                 let wrapped_ip_packet = Ipv4Packet::new(&dest_unreachable).unwrap();
                 //println!("{:02x}", wrapped_ip_packet.packet().as_hex());
-                self.analyse_icmp_packet_in(wrapped_ip_packet.payload(), &icmp_packet_in.packet(), packet_out)
+                self.analyse_icmp_packet_in(
+                    wrapped_ip_packet.payload(),
+                    &icmp_packet_in.packet(),
+                    packet_out,
+                )
             }
             _ => Err(Error::new(ErrorKind::Other, "unidentified packet type")),
         }
@@ -394,7 +474,11 @@ impl TraceRoute {
                 }
                 let wrapped_ip_packet = Ipv6Packet::new(&icmp_packet_in.payload()).unwrap();
                 //println!("unwrap ip: {:?}", wrapped_ip_packet);
-                self.analyse_icmp_packet_in(wrapped_ip_packet.payload(), &icmp_packet_in.packet(), packet_out)
+                self.analyse_icmp_packet_in(
+                    wrapped_ip_packet.payload(),
+                    &icmp_packet_in.packet(),
+                    packet_out,
+                )
             }
             _ => {
                 println!("{:?}", icmp_packet_in.get_icmpv6_type());
@@ -430,17 +514,19 @@ impl TraceRoute {
 
         self.ttl += 1;
         let mut trace_hops = Vec::with_capacity(DEFAULT_TRT_COUNT as usize);
+        let socket_out = self.create_socket(true);
+        socket_out.set_reuse_address(true).unwrap();
+        let src = get_sock_addr(&self.af, self.ident);
+        //socket_out.bind(&src).unwrap();
+        socket_out.set_nonblocking(true).unwrap();
 
-        for count in 0..DEFAULT_TRT_COUNT {
-            let socket_out = self.create_socket(true);
+        'trt: for count in 0..DEFAULT_TRT_COUNT {
             let ttl = self.set_ttl(&socket_out);
             self.ident = SRC_BASE_PORT - <u16>::from(rand::random::<u8>());
-            let src = get_sock_addr(&self.af, self.ident);
-            socket_out.bind(&src).unwrap();
             let packet_out = match self.proto {
                 TraceProtocol::ICMP => self.make_icmp_packet_out(),
                 TraceProtocol::UDP => self.make_udp_packet_out(),
-                _ => self.make_icmp_packet_out(),
+                TraceProtocol::TCP => self.make_tcp_packet_out(),
             };
             // println!(
             //     "ttl: {:?}, seq: {:?}, id: {:02x}",
@@ -463,15 +549,31 @@ impl TraceRoute {
 
             // If hop is not overwritten with a TraceHop struct within the while loop below
             // then the result will be a timed-out error
-            let mut hop: io::Result<TraceHop> = Err(Error::new(ErrorKind::TimedOut, "*"));
+            let mut hop: io::Result<TraceHop> = Err(Error::new(ErrorKind::TimedOut, "!!*"));
 
-            while SteadyTime::now() < start_time + self.timeout {
+            'timeout: while SteadyTime::now() < start_time + self.timeout {
+                // let read_tcp = match socket_out.recv_from(buf_in.as_mut_slice()) {
+                //     Err(ref err) if err.kind() == ErrorKind::WouldBlock => {
+                //         //println!("blup!");
+                //         continue 'timeout;
+                //     }
+                //     Err(e) => {
+                //         println!("error in rcv_from: {:?}", e);
+                //         Err(e)
+                //     }
+                //     Ok((len, s)) => {
+                //         println!("got a tcp packet");
+                //         Ok((len, s, SteadyTime::now() - start_time))
+                //     }
+                // };
+
                 let read = match self.socket_in.recv_from(buf_in.as_mut_slice()) {
                     Err(ref err) if err.kind() == ErrorKind::WouldBlock => {
-                        continue;
+                        //println!("blip!");
+                        continue 'timeout;
                     }
                     Err(e) => {
-                        println!("error in rcv_from: {:?}", e);
+                        //println!("error in rcv_from: {:?}", e);
                         Err(e)
                     }
                     Ok((len, s)) => Ok((len, s, SteadyTime::now() - start_time)),
@@ -480,7 +582,7 @@ impl TraceRoute {
                 let (packet_len, sender, rtt) = match read {
                     Ok(recv) => recv,
                     _ => {
-                        continue;
+                        continue 'timeout;
                     }
                 };
 
@@ -501,7 +603,7 @@ impl TraceRoute {
                                 });
                                 // we've got a positive result,
                                 // so break out of the while loop
-                                break;
+                                break 'timeout;
                             }
                             Err(ref err)
                                 if err.kind() == ErrorKind::InvalidData
@@ -513,7 +615,7 @@ impl TraceRoute {
                                 // this packet might not be meant for this tracehop,
                                 // so DO NOT break the while loop and listen for some
                                 // other packet that might come in.
-                                continue;
+                                continue 'timeout;
                             }
                             Err(e) => trace_hops.push(Err(e)),
                         }
@@ -531,13 +633,13 @@ impl TraceRoute {
                                     hop_name: lookup_addr(&host.ip()).unwrap(),
                                     rtt: rtt,
                                 });
-                                break;
+                                break 'timeout;
                             }
                             err => {
                                 println!("* wut?");
                                 println!("{:?}", err);
                                 hop = Err(Error::new(ErrorKind::Other, "*"));
-                                continue;
+                                continue 'timeout;
                             }
                         }
                     }
@@ -566,7 +668,7 @@ impl Iterator for TraceRoute {
 
 /// Do traceroute
 pub fn start<'a, T: ToSocketAddrs>(address: T) -> io::Result<TraceRoute> {
-    sync_start_with_timeout(address, Duration::seconds(1))
+    sync_start_with_timeout(address, Duration::seconds(PACKET_IN_TIMEOUT))
 }
 
 /// Run-of-the-mill icmp ipv4/ipv6 traceroute implementation (for now)
@@ -581,17 +683,23 @@ pub fn sync_start_with_timeout<'a, T: ToSocketAddrs>(
         _ => (),
     };
 
+    // TODO: for TCP there also needs to be a socket listening to Protocol TCP
+    // to catch the SYN+ACK packet coming in from the destination.
+    // which seems impossible to do in BSDs, so they would need to be caught at
+    // the datalink layer (with libpcap I guess), so maybe we should do that for
+    // all OSes (since we depend on lipcap anyway)?
     let socket_in = match address.to_socket_addrs().unwrap().next().unwrap().is_ipv4() {
         true => Socket::new(Domain::ipv4(), Type::raw(), Some(<Protocol>::icmpv4())).unwrap(),
         false => Socket::new(Domain::ipv6(), Type::raw(), Some(<Protocol>::icmpv6())).unwrap(),
     };
 
+    socket_in.set_reuse_address(true).unwrap();
     socket_in
-        .set_nonblocking(false)
+        .set_nonblocking(true)
         .expect("Cannot set socket to blocking mode");
-    socket_in
-        .set_read_timeout(Some(timeout.to_std().unwrap()))
-        .expect("Cannot set read timeout on socket");
+    // socket_in
+    //     .set_read_timeout(Some(timeout.to_std().unwrap()))
+    //     .expect("Cannot set read timeout on socket");
 
     let mut addr_iter = try!(address.to_socket_addrs());
     match addr_iter.next() {
