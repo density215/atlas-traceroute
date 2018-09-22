@@ -102,10 +102,6 @@ pub struct TraceHop {
 }
 
 fn get_sock_addr<'a>(af: &AddressFamily, port: u16) -> SockAddr {
-    let filter_public_if_for_af = |addr: &IpNetwork| match af {
-        &AddressFamily::V4 => addr.is_ipv4() && !addr.ip().is_loopback(),
-        &AddressFamily::V6 => addr.is_ipv6() && addr.ip().is_global(),
-    };
     let interfaces = pnet::datalink::interfaces();
     let interface = interfaces
         .into_iter()
@@ -118,7 +114,8 @@ fn get_sock_addr<'a>(af: &AddressFamily, port: u16) -> SockAddr {
         }).map(|a| a.ip())
         .nth(0)
         .unwrap();
-    //println!("src_addr: {:?}, port: {:02x}", interface, &[port].as_hex());
+
+    println!("src_addr: {:?}, port: {:02x}", interface, &[port].as_hex());
 
     match interface {
         IpAddr::V4(addrv4) => <SockAddr>::from(SocketAddrV4::new(addrv4, port)),
