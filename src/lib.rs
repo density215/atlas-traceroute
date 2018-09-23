@@ -363,6 +363,8 @@ impl TraceRoute {
                 tcp_packet.set_checksum(tcp_checksum);
                 tcp_packet.packet().to_owned()
             }
+            // TODO: Make this TCP. This is not tcp at all, this is just
+            // a copy of the V6 udp tr
             AddressFamily::V6 => {
                 let src_ip = self
                     .src_addr
