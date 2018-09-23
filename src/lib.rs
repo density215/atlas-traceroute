@@ -8,11 +8,20 @@ extern crate rand;
 extern crate socket2;
 extern crate time;
 
+use std::fmt;
 use std::iter::Iterator;
+
+#[macro_use]
+extern crate serde_derive;
+
+extern crate serde;
+extern crate serde_json;
 
 use std::io::{self, Error, ErrorKind};
 use std::net::{IpAddr, SocketAddrV4};
 use std::net::{SocketAddr, SocketAddrV6, ToSocketAddrs};
+
+use serde::ser::{Serialize, Serializer};
 
 use pnet::datalink::NetworkInterface;
 use pnet::packet::icmp::checksum;
@@ -47,6 +56,34 @@ const DEFAULT_TCP_DEST_PORT: u16 = 0x50; // port 80, actually a UI default in At
 const DEFAULT_TRT_COUNT: u8 = 3;
 const PACKET_IN_TIMEOUT: i64 = 1;
 
+mod as_json_string {
+    use serde::ser::{Serialize, Serializer};
+    use serde_json;
+
+    pub fn serialize<T, S>(value: &T, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        T: Serialize,
+        S: Serializer,
+    {
+        use serde::ser::Error;
+        let j = serde_json::to_string(value).map_err(Error::custom)?;
+        j.serialize(serializer)
+    }
+}
+// impl Serialize for TraceResult {
+//     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+//     where
+//         S: Serializer,
+//     {
+//         // 3 is the number of fields in the struct.
+//         let mut state = serializer.serialize_struct("TraceResult", 3)?;
+//         state.serialize_field("error", &self.error)?;
+//         state.serialize_field("hop", &self.hop)?;
+//         state.serialize_field("result", &self.result)?;
+//         state.end()
+//     }
+// }
+
 #[derive(Debug)]
 enum AddressFamily {
     V4,
@@ -77,11 +114,36 @@ pub struct TraceRoute {
     socket_in: Socket,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+pub struct HopTimeOutError {
+    pub message: String,
+    pub line: usize,
+    pub column: usize,
+}
+
+impl fmt::Display for HopTimeOutError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(f, "* {}", self.message)
+    }
+}
+
+impl Serialize for HopTimeOutError {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&*self.message)
+    }
+}
+
+#[derive(Debug, Serialize)]
 pub struct TraceResult {
+    // This is a global error for all hops in this sequence
+    #[serde(skip_serializing)]
     pub error: io::Result<Error>,
     pub hop: u8,
-    pub result: Vec<io::Result<TraceHop>>,
+    #[serde(with = "as_json_string")]
+    pub result: Vec<Result<TraceHop, HopTimeOutError>>,
 }
 
 #[derive(Debug)]
@@ -91,7 +153,13 @@ pub enum TraceProtocol {
     TCP,
 }
 
-#[derive(Debug)]
+// To satisfy the coherency rules
+// we wrap the hop rtt in a tuple-like struct.
+// As always turns out that the compiler is right,
+// this is actually better.
+pub struct HopDuration(time::Duration);
+
+#[derive(Debug, Serialize)]
 pub struct TraceHop {
     /// IP address of the hophost
     pub host: SocketAddr,
@@ -100,9 +168,26 @@ pub struct TraceHop {
     /// Time-to-live for this hop
     pub ttl: u8,
     /// Round-trip-time for this packet
-    pub rtt: Duration,
+    pub rtt: HopDuration,
     /// Size of the reply
     pub size: usize,
+}
+
+impl Serialize for HopDuration {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let HopDuration(d) = *self;
+        serializer.serialize_f64(d.num_microseconds().unwrap() as f64 / 1000.0)
+    }
+}
+
+impl fmt::Debug for HopDuration {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let HopDuration(d) = self;
+        write!(f, "{}µs", d.num_microseconds().unwrap())
+    }
 }
 
 fn get_sock_addr<'a>(af: &AddressFamily, port: u16) -> SockAddr {
@@ -511,7 +596,8 @@ impl TraceRoute {
         };
 
         self.ttl += 1;
-        let mut trace_hops = Vec::with_capacity(DEFAULT_TRT_COUNT as usize);
+        let mut trace_hops: Vec<Result<TraceHop, HopTimeOutError>> =
+            Vec::with_capacity(DEFAULT_TRT_COUNT as usize);
         let socket_out = self.create_socket(true);
         socket_out.set_reuse_address(true).unwrap();
         let src = get_sock_addr(&self.af, self.ident);
@@ -548,7 +634,11 @@ impl TraceRoute {
 
             // If hop is not overwritten with a TraceHop struct within the while loop below
             // then the result will be a timed-out error
-            let mut hop: io::Result<TraceHop> = Err(Error::new(ErrorKind::TimedOut, "!!*"));
+            let mut hop: Result<TraceHop, HopTimeOutError> = Err(HopTimeOutError {
+                message: "!!*".to_string(),
+                line: 0,
+                column: 0,
+            });
 
             'timeout: while SteadyTime::now() < start_time + self.timeout {
                 // let read_tcp = match socket_out.recv_from(buf_in.as_mut_slice()) {
@@ -598,7 +688,7 @@ impl TraceRoute {
                                     size: packet_len,
                                     host: host,
                                     hop_name: lookup_addr(&host.ip()).unwrap(),
-                                    rtt: rtt,
+                                    rtt: HopDuration(rtt),
                                 });
                                 // we've got a positive result,
                                 // so break out of the while loop
@@ -610,13 +700,21 @@ impl TraceRoute {
                             {
                                 println!("*");
                                 println!("{:?}", err);
-                                hop = Err(Error::new(ErrorKind::InvalidData, "*"));
+                                hop = Err(HopTimeOutError {
+                                    message: "*".to_string(),
+                                    line: 0,
+                                    column: 0,
+                                });
                                 // this packet might not be meant for this tracehop,
                                 // so DO NOT break the while loop and listen for some
                                 // other packet that might come in.
                                 continue 'timeout;
                             }
-                            Err(e) => trace_hops.push(Err(e)),
+                            Err(e) => trace_hops.push(Err(HopTimeOutError {
+                                message: e.to_string(),
+                                line: 0,
+                                column: 0,
+                            })),
                         }
                     }
                     IcmpPacketIn::V4(ip_packet_in) => {
@@ -630,14 +728,18 @@ impl TraceRoute {
                                     size: packet_len,
                                     host: host,
                                     hop_name: lookup_addr(&host.ip()).unwrap(),
-                                    rtt: rtt,
+                                    rtt: HopDuration(rtt),
                                 });
                                 break 'timeout;
                             }
                             err => {
                                 println!("* wut?");
                                 println!("{:?}", err);
-                                hop = Err(Error::new(ErrorKind::Other, "*"));
+                                hop = Err(HopTimeOutError {
+                                    message: "* wut?".to_string(),
+                                    line: 0,
+                                    column: 0,
+                                });
                                 continue 'timeout;
                             }
                         }
@@ -729,19 +831,19 @@ pub fn sync_start_with_timeout<'a, T: ToSocketAddrs>(
             println!("timestamp: {:?}", time::get_time().sec);
 
             Ok({
-                        TraceRoute {
-                            src_addr: src_addr,
-                            dst_addr: dst_addr,
+                TraceRoute {
+                    src_addr: src_addr,
+                    dst_addr: dst_addr,
                     af: af,
-                            proto: TraceProtocol::UDP,
-                            ttl: 0,
-                            ident: rand::random(),
-                            seq_num: 0,
-                            done: false,
-                            timeout: timeout,
-                            result: Vec::new(),
-                            socket_in: socket_in,
-                        }
+                    proto: TraceProtocol::TCP,
+                    ttl: 0,
+                    ident: rand::random(),
+                    seq_num: 0,
+                    done: false,
+                    timeout: timeout,
+                    result: Vec::new(),
+                    socket_in: socket_in,
+                }
             })
         }
     }
