@@ -21,7 +21,7 @@ use std::io::{self, Error, ErrorKind};
 use std::net::{IpAddr, SocketAddrV4};
 use std::net::{SocketAddr, SocketAddrV6, ToSocketAddrs};
 
-use serde::ser::{Serialize, Serializer};
+use serde::ser::{Serialize, Serializer, SerializeStruct};
 
 use pnet::datalink::NetworkInterface;
 use pnet::packet::icmp::checksum;
@@ -55,34 +55,6 @@ const DST_BASE_PORT: u16 = 0x8000 + 666;
 const DEFAULT_TCP_DEST_PORT: u16 = 0x50; // port 80, actually a UI default in Atlas.
 const DEFAULT_TRT_COUNT: u8 = 3;
 const PACKET_IN_TIMEOUT: i64 = 1;
-
-mod as_json_string {
-    use serde::ser::{Serialize, Serializer};
-    use serde_json;
-
-    pub fn serialize<T, S>(value: &T, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        T: Serialize,
-        S: Serializer,
-    {
-        use serde::ser::Error;
-        let j = serde_json::to_string(value).map_err(Error::custom)?;
-        j.serialize(serializer)
-    }
-}
-// impl Serialize for TraceResult {
-//     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-//     where
-//         S: Serializer,
-//     {
-//         // 3 is the number of fields in the struct.
-//         let mut state = serializer.serialize_struct("TraceResult", 3)?;
-//         state.serialize_field("error", &self.error)?;
-//         state.serialize_field("hop", &self.hop)?;
-//         state.serialize_field("result", &self.result)?;
-//         state.end()
-//     }
-// }
 
 #[derive(Debug)]
 enum AddressFamily {
@@ -130,9 +102,11 @@ impl fmt::Display for HopTimeOutError {
 impl Serialize for HopTimeOutError {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
-        S: Serializer,
+        S: serde::ser::Serializer,
     {
-        serializer.serialize_str(&*self.message)
+        let mut s = serializer.serialize_struct("HopTimeOutError", 1)?;
+        s.serialize_field("x", &"*".to_string())?;
+        s.end()
     }
 }
 
@@ -142,7 +116,6 @@ pub struct TraceResult {
     #[serde(skip_serializing)]
     pub error: io::Result<Error>,
     pub hop: u8,
-    #[serde(with = "as_json_string")]
     pub result: Vec<Result<TraceHop, HopTimeOutError>>,
 }
 
@@ -162,7 +135,7 @@ pub struct HopDuration(time::Duration);
 #[derive(Debug, Serialize)]
 pub struct TraceHop {
     /// IP address of the hophost
-    pub host: SocketAddr,
+    pub from: SocketAddr,
     /// The resolved hostname
     pub hop_name: String,
     /// Time-to-live for this hop
@@ -637,7 +610,7 @@ impl TraceRoute {
             // If hop is not overwritten with a TraceHop struct within the while loop below
             // then the result will be a timed-out error
             let mut hop: Result<TraceHop, HopTimeOutError> = Err(HopTimeOutError {
-                message: "!!*".to_string(),
+                message: "hop timeout".to_string(),
                 line: 0,
                 column: 0,
             });
@@ -688,7 +661,7 @@ impl TraceRoute {
                                 hop = Ok(TraceHop {
                                     ttl: ttl_in,
                                     size: packet_len,
-                                    host: host,
+                                    from: host,
                                     hop_name: lookup_addr(&host.ip()).unwrap(),
                                     rtt: HopDuration(rtt),
                                 });
@@ -728,7 +701,7 @@ impl TraceRoute {
                                 hop = Ok(TraceHop {
                                     ttl: ttl_in,
                                     size: packet_len,
-                                    host: host,
+                                    from: host,
                                     hop_name: lookup_addr(&host.ip()).unwrap(),
                                     rtt: HopDuration(rtt),
                                 });
@@ -837,7 +810,7 @@ pub fn sync_start_with_timeout<'a, T: ToSocketAddrs>(
                     src_addr: src_addr,
                     dst_addr: dst_addr,
                     af: af,
-                    proto: TraceProtocol::TCP,
+                    proto: TraceProtocol::ICMP,
                     ttl: 0,
                     ident: rand::random(),
                     seq_num: 0,
