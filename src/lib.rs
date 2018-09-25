@@ -21,7 +21,7 @@ use std::io::{self, Error, ErrorKind};
 use std::net::{IpAddr, SocketAddrV4};
 use std::net::{SocketAddr, SocketAddrV6, ToSocketAddrs};
 
-use serde::ser::{Serialize, Serializer, SerializeStruct};
+use serde::ser::{Serialize, SerializeStruct, Serializer};
 
 use pnet::datalink::NetworkInterface;
 use pnet::packet::icmp::checksum;
