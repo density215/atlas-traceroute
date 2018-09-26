@@ -21,7 +21,7 @@ fn main() {
             }
         }
         Err(err) => {
-            println!("{:?}", err);
+            println!("{}", err);
         }
     };
 

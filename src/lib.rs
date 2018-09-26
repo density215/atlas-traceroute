@@ -759,14 +759,49 @@ pub fn sync_start_with_timeout<'a, T: ToSocketAddrs>(
         _ => (),
     };
 
+    let mut addr_iter = address.to_socket_addrs()?.peekable();
+    let mut addr_iter_first = match addr_iter.peek() {
+        Some(&addr) => addr,
+        None => panic!("Cannot parse the resolved IP address(es) for requested hostname"),
+    };
+
+    println!("{:?}", &addr_iter_first);
     // TODO: for TCP there also needs to be a socket listening to Protocol TCP
     // to catch the SYN+ACK packet coming in from the destination.
     // which seems impossible to do in BSDs, so they would need to be caught at
     // the datalink layer (with libpcap I guess), so maybe we should do that for
     // all OSes (since we depend on lipcap anyway)?
-    let socket_in = match address.to_socket_addrs().unwrap().next().unwrap().is_ipv4() {
-        true => Socket::new(Domain::ipv4(), Type::raw(), Some(<Protocol>::icmpv4())).unwrap(),
-        false => Socket::new(Domain::ipv6(), Type::raw(), Some(<Protocol>::icmpv6())).unwrap(),
+
+    // create a socket based on the address family of the specified destination address.
+    // let socket_in = match &addr_iter_first {
+    //     SocketAddr::V4(_) => Socket::new(Domain::ipv4(), Type::raw(), Some(<Protocol>::icmpv4()))?,
+    //     SocketAddr::V6(_) => Socket::new(Domain::ipv6(), Type::raw(), Some(<Protocol>::icmpv6()))?,
+    // };
+
+    // let mut addr_iter = address.to_socket_addrs()?;
+    let src_addr;
+    let af;
+    let socket_in;
+
+    // match addr_iter_first {
+    //     None => Err(Error::new(
+    //         ErrorKind::InvalidInput,
+    //         "Could not interpret address",
+    //     )),
+    //     Some(mut dst_addr) => {
+    match addr_iter_first {
+        SocketAddr::V4(_) => {
+            src_addr = get_sock_addr(&AddressFamily::V4, SRC_BASE_PORT);
+            af = AddressFamily::V4;
+            socket_in = Socket::new(Domain::ipv4(), Type::raw(), Some(<Protocol>::icmpv4()))?;
+            addr_iter_first.set_port(DST_BASE_PORT)
+        }
+        SocketAddr::V6(_) => {
+            src_addr = get_sock_addr(&AddressFamily::V6, SRC_BASE_PORT);
+            af = AddressFamily::V6;
+            socket_in = Socket::new(Domain::ipv6(), Type::raw(), Some(<Protocol>::icmpv6()))?;
+            addr_iter_first.set_port(DST_BASE_PORT)
+        }
     };
 
     socket_in.set_reuse_address(true).unwrap();
@@ -777,49 +812,26 @@ pub fn sync_start_with_timeout<'a, T: ToSocketAddrs>(
     //     .set_read_timeout(Some(timeout.to_std().unwrap()))
     //     .expect("Cannot set read timeout on socket");
 
-    let mut addr_iter = try!(address.to_socket_addrs());
-    let src_addr;
-    let af;
+    println!("af: IP{:?}", af);
+    println!("src_addr: {:?}", src_addr);
+    println!("dst_addr: {:?}", addr_iter_first);
+    println!("timestamp: {:?}", time::get_time().sec);
 
-    match addr_iter.next() {
-        None => Err(Error::new(
-            ErrorKind::InvalidInput,
-            "Could not interpret address",
-        )),
-        Some(mut dst_addr) => {
-            match &dst_addr.is_ipv4() {
-                true => {
-                    src_addr = get_sock_addr(&AddressFamily::V4, SRC_BASE_PORT);
-                    af = AddressFamily::V4;
-                    dst_addr.set_port(DST_BASE_PORT)
-                }
-                false => {
-                    src_addr = get_sock_addr(&AddressFamily::V6, SRC_BASE_PORT);
-                    af = AddressFamily::V6;
-                    dst_addr.set_port(DST_BASE_PORT)
-                }
-            };
-
-            println!("af: IP{:?}", af);
-            println!("src_addr: {:?}", src_addr);
-            println!("dst_addr: {:?}", dst_addr);
-            println!("timestamp: {:?}", time::get_time().sec);
-
-            Ok({
-                TraceRoute {
-                    src_addr: src_addr,
-                    dst_addr: dst_addr,
-                    af: af,
-                    proto: TraceProtocol::ICMP,
-                    ttl: 0,
-                    ident: rand::random(),
-                    seq_num: 0,
-                    done: false,
-                    timeout: timeout,
-                    result: Vec::new(),
-                    socket_in: socket_in,
-                }
-            })
+    Ok({
+        TraceRoute {
+            src_addr: src_addr,
+            dst_addr: addr_iter_first,
+            af: af,
+            proto: TraceProtocol::ICMP,
+            ttl: 0,
+            ident: rand::random(),
+            seq_num: 0,
+            done: false,
+            timeout: timeout,
+            result: Vec::new(),
+            socket_in: socket_in,
         }
-    }
+    })
 }
+// }
+// }
