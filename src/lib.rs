@@ -55,6 +55,7 @@ const DST_BASE_PORT: u16 = 0x8000 + 666;
 const DEFAULT_TCP_DEST_PORT: u16 = 0x50; // port 80, actually a UI default in Atlas.
 const DEFAULT_TRT_COUNT: u8 = 3;
 const PACKET_IN_TIMEOUT: i64 = 1;
+const START_TTL: u16 = 0; // yeah,yeah, wasting a byte here, but we're going to sum this with DST_BASE_PORT
 
 #[derive(Debug)]
 enum AddressFamily {
@@ -77,7 +78,7 @@ pub struct TraceRoute {
     dst_addr: SocketAddr,
     af: AddressFamily,
     proto: TraceProtocol,
-    ttl: u32,
+    ttl: u16,
     ident: u16,
     seq_num: u16,
     done: bool,
@@ -551,11 +552,11 @@ impl TraceRoute {
         match self.af {
             AddressFamily::V4 => {
                 //println!("socket ttl: {:?}", self.ttl);
-                try!(socket.set_ttl(self.ttl));
+                try!(socket.set_ttl(self.ttl as u32));
                 socket.ttl()
             }
             AddressFamily::V6 => {
-                try!(socket.set_unicast_hops_v6(self.ttl));
+                try!(socket.set_unicast_hops_v6(self.ttl as u32));
                 socket.unicast_hops_v6()
             }
         }
@@ -828,10 +829,9 @@ pub fn sync_start_with_timeout<'a, T: ToSocketAddrs>(
             src_addr: src_addr,
             dst_addr: addr_iter_first,
             af: af,
-            proto: TraceProtocol::ICMP,
-            ttl: 0,
+            ttl: START_TTL,
             ident: rand::random(),
-            seq_num: 0,
+            seq_num: START_TTL,
             done: false,
             timeout: timeout,
             result: Vec::new(),
