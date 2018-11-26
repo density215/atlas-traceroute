@@ -17,7 +17,13 @@ fn main() {
     match traceroute::start(addr) {
         Ok(t) => {
             for result in t {
-                println!("{}", serde_json::to_string_pretty(&result).unwrap());
+                match &result {
+                    Err(e) => {
+                        println!("{}", e);
+                    }
+                    Ok(r) => { println!("{}", serde_json::to_string_pretty(r).unwrap()) },
+                }
+                // println!("{}", serde_json::to_string_pretty(&result).unwrap());
             }
         }
         Err(err) => {
