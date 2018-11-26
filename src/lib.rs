@@ -776,48 +776,36 @@ pub fn sync_start_with_timeout<'a, T: ToSocketAddrs>(
         _ => (),
     };
 
-    let mut addr_iter = address.to_socket_addrs()?.peekable();
-    let mut addr_iter_first = match addr_iter.peek() {
-        Some(&addr) => addr,
+    let mut addr_iter = address.to_socket_addrs()?;
+    let mut dst_addr = match addr_iter.next() {
+        Some(addr) => addr,
         None => panic!("Cannot parse the resolved IP address(es) for requested hostname"),
     };
 
-    println!("{:?}", &addr_iter_first);
+    println!("{:?}", &dst_addr);
     // TODO: for TCP there also needs to be a socket listening to Protocol TCP
     // to catch the SYN+ACK packet coming in from the destination.
     // which seems impossible to do in BSDs, so they would need to be caught at
     // the datalink layer (with libpcap I guess), so maybe we should do that for
     // all OSes (since we depend on lipcap anyway)?
 
-    // create a socket based on the address family of the specified destination address.
-    // let socket_in = match &addr_iter_first {
-    //     SocketAddr::V4(_) => Socket::new(Domain::ipv4(), Type::raw(), Some(<Protocol>::icmpv4()))?,
-    //     SocketAddr::V6(_) => Socket::new(Domain::ipv6(), Type::raw(), Some(<Protocol>::icmpv6()))?,
-    // };
-
-    // let mut addr_iter = address.to_socket_addrs()?;
     let src_addr;
     let af;
     let socket_in;
 
-    // match addr_iter_first {
-    //     None => Err(Error::new(
-    //         ErrorKind::InvalidInput,
-    //         "Could not interpret address",
-    //     )),
-    //     Some(mut dst_addr) => {
-    match addr_iter_first {
+    // figure out the address family from the destination address.
+    match dst_addr {
         SocketAddr::V4(_) => {
             src_addr = get_sock_addr(&AddressFamily::V4, SRC_BASE_PORT);
             af = AddressFamily::V4;
             socket_in = Socket::new(Domain::ipv4(), Type::raw(), Some(<Protocol>::icmpv4()))?;
-            addr_iter_first.set_port(DST_BASE_PORT)
+            dst_addr.set_port(DST_BASE_PORT)
         }
         SocketAddr::V6(_) => {
             src_addr = get_sock_addr(&AddressFamily::V6, SRC_BASE_PORT);
             af = AddressFamily::V6;
             socket_in = Socket::new(Domain::ipv6(), Type::raw(), Some(<Protocol>::icmpv6()))?;
-            addr_iter_first.set_port(DST_BASE_PORT)
+            dst_addr.set_port(DST_BASE_PORT)
         }
     };
 
@@ -825,19 +813,16 @@ pub fn sync_start_with_timeout<'a, T: ToSocketAddrs>(
     socket_in
         .set_nonblocking(true)
         .expect("Cannot set socket to blocking mode");
-    // socket_in
-    //     .set_read_timeout(Some(timeout.to_std().unwrap()))
-    //     .expect("Cannot set read timeout on socket");
 
     println!("af: IP{:?}", af);
     println!("src_addr: {:?}", src_addr);
-    println!("dst_addr: {:?}", addr_iter_first);
+    println!("dst_addr: {:?}", dst_addr);
     println!("timestamp: {:?}", time::get_time().sec);
 
     Ok({
         TraceRoute {
             src_addr: src_addr,
-            dst_addr: addr_iter_first,
+            dst_addr: dst_addr,
             af: af,
             ttl: START_TTL,
             ident: rand::random(),
