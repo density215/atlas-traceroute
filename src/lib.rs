@@ -20,6 +20,7 @@ extern crate serde_json;
 use std::io::{self, Error, ErrorKind};
 use std::net::{IpAddr, SocketAddrV4};
 use std::net::{SocketAddr, SocketAddrV6, ToSocketAddrs};
+use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use serde::ser::{Serialize, SerializeStruct, Serializer};
 
@@ -40,7 +41,6 @@ use pnet::packet::tcp::{ipv6_checksum as tcp_ipv6_checksum, MutableTcpPacket, Tc
 use pnet::packet::udp::{ipv4_checksum, ipv6_checksum};
 use pnet::packet::udp::{MutableUdpPacket, UdpPacket};
 use pnet::packet::Packet;
-use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use time::{Duration, SteadyTime};
 
 use dns_lookup::lookup_addr;
@@ -52,7 +52,7 @@ const ICMP_HEADER_LEN: usize = 8;
 const UDP_HEADER_LEN: usize = 8;
 const SRC_BASE_PORT: u16 = 0x5000;
 const DST_BASE_PORT: u16 = 0x8000 + 666;
-const DEFAULT_TCP_DEST_PORT: u16 = 0x50; // port 80, actually a UI default in Atlas.
+const DEFAULT_TCP_DEST_PORT: u16 = 0x5000; // port 0x50 (80) is the actual UI default in Atlas.
 const DEFAULT_TRT_COUNT: u8 = 3;
 const PACKET_IN_TIMEOUT: i64 = 1;
 const START_TTL: u16 = 0; // yeah,yeah, wasting a byte here, but we're going to sum this with DST_BASE_PORT
