@@ -736,16 +736,26 @@ impl TraceRoute {
 }
 
 impl Iterator for TraceRoute {
-    type Item = TraceResult;
+    type Item = io::Result<TraceResult>;
 
-    fn next(&mut self) -> Option<TraceResult> {
+    fn next(&mut self) -> Option<io::Result<TraceResult>> {
         if self.done {
             return None;
         }
 
-        let trace_result = self.next_hop();
+        let trace_result = match self.next_hop() {
+            Ok(r) => Result::Ok(r),
+            Err(e) => {
+                // This is a fatal condition,
+                // probably a socket that cannot be opened,
+                // or a packet that just gets stuck on its way out of localhost.
+                // gracefully end all this.
+                self.done = true;
+                Result::Err(e)
+            }
+        };
 
-        Some(trace_result.unwrap())
+        Some(trace_result)
     }
 }
 
