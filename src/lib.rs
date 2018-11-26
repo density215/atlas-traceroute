@@ -594,9 +594,15 @@ impl TraceRoute {
             //     self.seq_num,
             //     &[self.ident].as_hex()
             // );
-            self.dst_addr.set_port(self.seq_num + DST_BASE_PORT);
-            //println!("src_port: {:02x}", &[self.dst_addr.port()].as_hex());
-            let wrote = try!(socket_out.send_to(&packet_out, &<SockAddr>::from(self.dst_addr)));
+
+            let dst_port_for_hop = match self.proto {
+                TraceProtocol::ICMP => self.seq_num + DST_BASE_PORT,
+                TraceProtocol::UDP => self.seq_num + DST_BASE_PORT,
+                TraceProtocol::TCP => DEFAULT_TCP_DEST_PORT
+            };
+            self.dst_addr.set_port(dst_port_for_hop);
+            println!("dst_addr port: {:02x}", &[self.dst_addr.port()].as_hex());
+            let wrote = socket_out.send_to(&packet_out, &<SockAddr>::from(self.dst_addr))?;
             assert_eq!(wrote, packet_out.len());
             let start_time = SteadyTime::now();
 
