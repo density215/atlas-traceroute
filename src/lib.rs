@@ -575,7 +575,7 @@ impl TraceRoute {
         let mut trace_hops: Vec<Result<TraceHop, HopTimeOutError>> =
             Vec::with_capacity(DEFAULT_TRT_COUNT as usize);
         let socket_out = self.create_socket(true);
-        socket_out.set_reuse_address(true).unwrap();
+        socket_out.set_reuse_address(true)?;
         let src = get_sock_addr(&self.af, self.ident);
 
         //socket_out.bind(&src).unwrap();
