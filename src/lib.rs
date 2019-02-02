@@ -56,6 +56,7 @@ const DEFAULT_TCP_DEST_PORT: u16 = 0x5000; // port 0x50 (80) is the actual UI de
 const DEFAULT_TRT_COUNT: u8 = 3;
 const PACKET_IN_TIMEOUT: i64 = 1;
 const START_TTL: u16 = 0; // yeah,yeah, wasting a byte here, but we're going to sum this with DST_BASE_PORT
+const DEFAULT_MAX_HOPS: u16 = 255; // max hops to hopperdehop
 
 #[derive(Debug)]
 enum AddressFamily {
@@ -446,7 +447,7 @@ impl TraceRoute {
                 // `Time Exceeded` packages do not have a identifier or sequence number
                 // They do return up to 576 bytes of the original IP packet
                 // So that's where we identify the packet to belong to this `packet_out`.
-                if self.ttl == 255 {
+                if self.ttl == DEFAULT_MAX_HOPS {
                     self.done = true;
                     return Err(Error::new(ErrorKind::TimedOut, "too many hops"));
                 }
@@ -527,7 +528,7 @@ impl TraceRoute {
                 // `Time Exceeded` packages do not have a identifier or sequence number
                 // They do return up to 576 bytes of the original IP packet
                 // So that's where we identify the packet to belong to this `packet_out`.
-                if self.ttl == 255 {
+                if self.ttl == DEFAULT_MAX_HOPS {
                     self.done = true;
                     return Err(Error::new(ErrorKind::TimedOut, "too many hops"));
                 }
@@ -824,6 +825,7 @@ pub fn sync_start_with_timeout<'a, T: ToSocketAddrs>(
             src_addr: src_addr,
             dst_addr: dst_addr,
             af: af,
+            proto: TraceProtocol::TCP,
             ttl: START_TTL,
             ident: rand::random(),
             seq_num: START_TTL,
