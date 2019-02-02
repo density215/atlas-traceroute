@@ -17,10 +17,10 @@ extern crate serde_derive;
 extern crate serde;
 extern crate serde_json;
 
+use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use std::io::{self, Error, ErrorKind};
 use std::net::{IpAddr, SocketAddrV4};
 use std::net::{SocketAddr, SocketAddrV6, ToSocketAddrs};
-use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use serde::ser::{Serialize, SerializeStruct, Serializer};
 
@@ -52,14 +52,9 @@ const ICMP_HEADER_LEN: usize = 8;
 const UDP_HEADER_LEN: usize = 8;
 const SRC_BASE_PORT: u16 = 0x5000;
 const DST_BASE_PORT: u16 = 0x8000 + 666;
-const DEFAULT_TCP_DEST_PORT: u16 = 0x5000; // port 0x50 (80) is the actual UI default in Atlas.
-const DEFAULT_TRT_COUNT: u8 = 3;
-const PACKET_IN_TIMEOUT: i64 = 1;
-const START_TTL: u16 = 0; // yeah,yeah, wasting a byte here, but we're going to sum this with DST_BASE_PORT
-const DEFAULT_MAX_HOPS: u16 = 255; // max hops to hopperdehop
 
-#[derive(Debug)]
-enum AddressFamily {
+#[derive(Debug, Clone, Copy)]
+pub enum AddressFamily {
     V4,
     V6,
 }
@@ -74,18 +69,34 @@ pub fn make_icmp6_packet(payload: &[u8]) -> Icmpv6Packet {
 }
 
 #[derive(Debug)]
-pub struct TraceRoute {
-    src_addr: SockAddr,
+pub struct TraceRouteSpec {
+    pub proto: TraceProtocol,
+    pub af: Option<AddressFamily>, // might be empty, but could then be inferred from the dst_addr (if it's an IP address)
+    pub start_ttl: u16,
+    pub max_hops: u16,
+    pub packets_per_hop: u8,
+    pub tcp_dest_port: u16,
+    pub timeout: i64,
+    pub uuid: String,
+}
+
+#[derive(Debug)]
+pub struct TraceRoute<'a> {
     dst_addr: SocketAddr,
+    // af is based on either the user option, or from the
+    // destination address if it was an IP address.
     af: AddressFamily,
-    proto: TraceProtocol,
+    // inferred from user options
+    spec: &'a TraceRouteSpec,
+    // invariants for this tr
+    src_addr: SockAddr,
+    socket_in: Socket,
+    // mutable state
     ttl: u16,
     ident: u16,
     seq_num: u16,
     done: bool,
-    timeout: Duration,
     pub result: Vec<TraceResult>,
-    socket_in: Socket,
 }
 
 #[derive(Debug, Clone)]
@@ -175,7 +186,8 @@ fn get_sock_addr<'a>(af: &AddressFamily, port: u16) -> SockAddr {
         .filter(|addr| match af {
             &AddressFamily::V4 => addr.is_ipv4() && !addr.ip().is_loopback(),
             &AddressFamily::V6 => addr.is_ipv6() && addr.ip().is_global(),
-        }).map(|a| a.ip())
+        })
+        .map(|a| a.ip())
         .nth(0)
         .unwrap();
 
@@ -185,11 +197,11 @@ fn get_sock_addr<'a>(af: &AddressFamily, port: u16) -> SockAddr {
     }
 }
 
-impl TraceRoute {
+impl<'a> TraceRoute<'a> {
     // TODO: refactor to be only used for OUTGOING socket.
     fn create_socket(&self, out: bool) -> Socket {
         let af = &self.af;
-        let protocol = match (out, &self.proto) {
+        let protocol = match (out, &self.spec.proto) {
             (false, _) => match af {
                 &AddressFamily::V4 => Some(<Protocol>::icmpv4()),
                 &AddressFamily::V6 => Some(<Protocol>::icmpv6()),
@@ -202,7 +214,7 @@ impl TraceRoute {
             (true, &TraceProtocol::TCP) => Some(<Protocol>::tcp()),
         };
 
-        let sock_type = match (out, &self.proto) {
+        let sock_type = match (out, &self.spec.proto) {
             (false, _) => Type::raw(),
             (true, &TraceProtocol::ICMP) => Type::raw(),
             (true, &TraceProtocol::UDP) => Type::dgram(),
@@ -327,7 +339,7 @@ impl TraceRoute {
                 tcp_packet.set_data_offset(5);
                 tcp_packet.set_flags(SYN);
                 tcp_packet.set_source(SRC_BASE_PORT);
-                tcp_packet.set_destination(DEFAULT_TCP_DEST_PORT);
+                tcp_packet.set_destination(self.spec.tcp_dest_port);
                 //tcp_packet.packet_size(0x00);
                 //The `official` tcp checksum
                 let tcp_checksum = tcp_ipv4_checksum(
@@ -394,7 +406,7 @@ impl TraceRoute {
     ) -> Result<(), Error> {
         // We don't have any ICMP header data right now
         // So we're only using the last 4 bytes in the payload to compare.
-        match &self.proto {
+        match &self.spec.proto {
             &TraceProtocol::ICMP if wrapped_ip_packet[4..8] == packet_out[4..8] => Ok(()),
             &TraceProtocol::UDP if wrapped_ip_packet[8..16] == packet_out[..8] => Ok(()),
             /* Unfortunately, cheap home routers may
@@ -405,7 +417,11 @@ impl TraceRoute {
             &TraceProtocol::UDP if wrapped_ip_packet[..4] == packet_out[..4] => {
                 println!("checksum invalid - ignoring");
 
-                print!("packet out {:?}: {:02x}", &self.proto, &packet_out.as_hex());
+                print!(
+                    "packet out {:?}: {:02x}",
+                    &self.spec.proto,
+                    &packet_out.as_hex()
+                );
                 print!(" -> ");
                 println!("icmp payload: {:02x}", &wrapped_ip_packet[..8].as_hex());
                 println!(
@@ -418,7 +434,11 @@ impl TraceRoute {
             &TraceProtocol::UDP if icmp_packet_in[28..36] == wrapped_ip_packet[..8] => Ok(()),
             &TraceProtocol::TCP if wrapped_ip_packet[..12] == packet_out[..12] => Ok(()),
             _ => {
-                print!("packet out {:?}: {:02x}", &self.proto, &packet_out.as_hex());
+                print!(
+                    "packet out {:?}: {:02x}",
+                    &self.spec.proto,
+                    &packet_out.as_hex()
+                );
                 print!(" -> ");
                 println!("icmp payload: {:02x}", &wrapped_ip_packet[..64].as_hex());
                 println!(
@@ -447,7 +467,7 @@ impl TraceRoute {
                 // `Time Exceeded` packages do not have a identifier or sequence number
                 // They do return up to 576 bytes of the original IP packet
                 // So that's where we identify the packet to belong to this `packet_out`.
-                if self.ttl == DEFAULT_MAX_HOPS {
+                if self.ttl == self.spec.max_hops {
                     self.done = true;
                     return Err(Error::new(ErrorKind::TimedOut, "too many hops"));
                 }
@@ -528,7 +548,7 @@ impl TraceRoute {
                 // `Time Exceeded` packages do not have a identifier or sequence number
                 // They do return up to 576 bytes of the original IP packet
                 // So that's where we identify the packet to belong to this `packet_out`.
-                if self.ttl == DEFAULT_MAX_HOPS {
+                if self.ttl == self.spec.max_hops {
                     self.done = true;
                     return Err(Error::new(ErrorKind::TimedOut, "too many hops"));
                 }
@@ -569,12 +589,12 @@ impl TraceRoute {
         let mut trace_result = TraceResult {
             error: Err(Error::new(ErrorKind::Other, "-42")),
             hop: self.seq_num as u8,
-            result: Vec::with_capacity(DEFAULT_TRT_COUNT as usize),
+            result: Vec::with_capacity(self.spec.packets_per_hop as usize),
         };
 
         self.ttl += 1;
         let mut trace_hops: Vec<Result<TraceHop, HopTimeOutError>> =
-            Vec::with_capacity(DEFAULT_TRT_COUNT as usize);
+            Vec::with_capacity(self.spec.packets_per_hop as usize);
         let socket_out = self.create_socket(true);
         socket_out.set_reuse_address(true)?;
         let src = get_sock_addr(&self.af, self.ident);
@@ -582,10 +602,10 @@ impl TraceRoute {
         //socket_out.bind(&src).unwrap();
         socket_out.set_nonblocking(true).unwrap();
 
-        'trt: for count in 0..DEFAULT_TRT_COUNT {
+        'trt: for count in 0..self.spec.packets_per_hop {
             let ttl = self.set_ttl(&socket_out);
             self.ident = SRC_BASE_PORT - <u16>::from(rand::random::<u8>());
-            let packet_out = match self.proto {
+            let packet_out = match self.spec.proto {
                 TraceProtocol::ICMP => self.make_icmp_packet_out(),
                 TraceProtocol::UDP => self.make_udp_packet_out(),
                 TraceProtocol::TCP => self.make_tcp_packet_out(),
@@ -597,10 +617,10 @@ impl TraceRoute {
             //     &[self.ident].as_hex()
             // );
 
-            let dst_port_for_hop = match self.proto {
+            let dst_port_for_hop = match self.spec.proto {
                 TraceProtocol::ICMP => self.seq_num + DST_BASE_PORT,
                 TraceProtocol::UDP => self.seq_num + DST_BASE_PORT,
-                TraceProtocol::TCP => DEFAULT_TCP_DEST_PORT
+                TraceProtocol::TCP => self.spec.tcp_dest_port,
             };
             self.dst_addr.set_port(dst_port_for_hop);
             println!("dst_addr port: {:02x}", &[self.dst_addr.port()].as_hex());
@@ -623,7 +643,7 @@ impl TraceRoute {
                 column: 0,
             });
 
-            'timeout: while SteadyTime::now() < start_time + self.timeout {
+            'timeout: while SteadyTime::now() < start_time + Duration::seconds(self.spec.timeout) {
                 // let read_tcp = match socket_out.recv_from(buf_in.as_mut_slice()) {
                 //     Err(ref err) if err.kind() == ErrorKind::WouldBlock => {
                 //         //println!("blup!");
@@ -736,7 +756,7 @@ impl TraceRoute {
     }
 }
 
-impl Iterator for TraceRoute {
+impl<'a> Iterator for TraceRoute<'a> {
     type Item = io::Result<TraceResult>;
 
     fn next(&mut self) -> Option<io::Result<TraceResult>> {
@@ -761,17 +781,20 @@ impl Iterator for TraceRoute {
 }
 
 /// Do traceroute
-pub fn start<'a, T: ToSocketAddrs>(address: T) -> io::Result<TraceRoute> {
-    sync_start_with_timeout(address, Duration::seconds(PACKET_IN_TIMEOUT))
-}
+// pub fn start<'a, T: ToSocketAddrs>(address: T, spec: TraceRouteSpec) -> io::Result<TraceRoute<'a>> {
+//     sync_start_with_timeout(address, spec)
+
+//     // address, Duration::seconds(PACKET_IN_TIMEOUT))
+// }
 
 /// Run-of-the-mill icmp ipv4/ipv6 traceroute implementation (for now)
 // Completely synchronous. Every packet that's send will trigger a wait for its return
 pub fn sync_start_with_timeout<'a, T: ToSocketAddrs>(
     address: T,
-    timeout: Duration,
-) -> io::Result<TraceRoute> {
-    match timeout.num_microseconds() {
+    spec: &'a TraceRouteSpec, // address: T,
+                          // timeout: Duration
+) -> io::Result<TraceRoute<'a>> {
+    match Duration::seconds(spec.timeout).num_microseconds() {
         None => return Err(Error::new(ErrorKind::InvalidInput, "Timeout too large")),
         Some(0) => return Err(Error::new(ErrorKind::InvalidInput, "Timeout too small")),
         _ => (),
@@ -791,23 +814,30 @@ pub fn sync_start_with_timeout<'a, T: ToSocketAddrs>(
     // all OSes (since we depend on lipcap anyway)?
 
     let src_addr;
-    let af;
+    let infer_af: AddressFamily;
     let socket_in;
 
     // figure out the address family from the destination address.
     match dst_addr {
         SocketAddr::V4(_) => {
             src_addr = get_sock_addr(&AddressFamily::V4, SRC_BASE_PORT);
-            af = AddressFamily::V4;
+            infer_af = AddressFamily::V4;
             socket_in = Socket::new(Domain::ipv4(), Type::raw(), Some(<Protocol>::icmpv4()))?;
             dst_addr.set_port(DST_BASE_PORT)
         }
         SocketAddr::V6(_) => {
             src_addr = get_sock_addr(&AddressFamily::V6, SRC_BASE_PORT);
-            af = AddressFamily::V6;
+            infer_af = AddressFamily::V6;
             socket_in = Socket::new(Domain::ipv6(), Type::raw(), Some(<Protocol>::icmpv6()))?;
             dst_addr.set_port(DST_BASE_PORT)
         }
+    };
+
+    // override inferred af from destination address with the user-set option
+    // if available
+    let af: AddressFamily = match spec.af {
+        Some(af) => af,
+        None => infer_af
     };
 
     socket_in.set_reuse_address(true).unwrap();
@@ -825,12 +855,11 @@ pub fn sync_start_with_timeout<'a, T: ToSocketAddrs>(
             src_addr: src_addr,
             dst_addr: dst_addr,
             af: af,
-            proto: TraceProtocol::TCP,
-            ttl: START_TTL,
+            spec: spec,
+            ttl: spec.start_ttl,
             ident: rand::random(),
-            seq_num: START_TTL,
+            seq_num: spec.start_ttl,
             done: false,
-            timeout: timeout,
             result: Vec::new(),
             socket_in: socket_in,
         }

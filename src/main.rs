@@ -1,7 +1,18 @@
+#[macro_use]
+
+extern crate structopt;
+extern crate serde;
+extern crate serde_json;
+extern crate traceroute;
+
+use std::env;
+use std::path::PathBuf;
+use structopt::StructOpt;
+
 /*
  * Copyright (c) 2013 RIPE NCC <atlas@ripe.net>
  * Licensed under GPLv2 or later, see file LICENSE in this tarball for details.
- * Standalone version of the event-based traceroute. 
+ * Standalone version of the event-based traceroute.
  */
 //config:config EVTRACEROUTE
 //config:       bool "evtraceroute"
@@ -39,99 +50,149 @@
 //usage:     "\n       -O <file>               Name of output file"
 //usage:     "\n       -S <size>               Size of packet"
 
+const DEFAULT_TRACE_PROTOCOL: traceroute::TraceProtocol = traceroute::TraceProtocol::ICMP;
+const DEFAULT_TCP_DEST_PORT: u16 = 0x5000; // port 0x50 (80) is the actual UI default in Atlas.
+const DEFAULT_PACKETS_PER_HOP: u8 = 3;
+const DEFAULT_PACKET_IN_TIMEOUT: i64 = 1;
+const DEFAULT_START_TTL: u16 = 0; // yeah,yeah, wasting a byte here, but we're going to sum this with DST_BASE_PORT
+const DEFAULT_MAX_HOPS: u16 = 255; // max hops to hopperdehop
 
-#[macro_use]
-
-extern crate structopt;
-extern crate serde;
-extern crate serde_json;
-extern crate traceroute;
-
-use std::env;
-use std::num::ParseIntError;
-use std::io::PathBuf;
-
-enum af {
-    V4,
-    V6
-}
-
-fn parse_af(af: &af) -> Result<traceroute::AddressFamily, ParseIntError> {
-    match af {
-        V4 => traceroute::AddressFamily::V4,
-        V6 => AddressFamily::V6,
-        _ => ParseIntError
+fn parse_af(af: &str) -> Result<traceroute::AddressFamily, &str> {
+    match af.parse::<u8>() {
+        Ok(4) => Ok(traceroute::AddressFamily::V4),
+        Ok(6) => Ok(traceroute::AddressFamily::V6),
+        _ => Err("Invalid address family"),
     }
 }
 
 #[derive(Debug, StructOpt)]
-#[structopt(name = "atlas-traceroute", about = "Perfom a RIPE Atlas compliant traceroute.")]
-struct TraceRouteSpec {
+#[structopt(
+    name = "atlas-traceroute",
+    about = "Perfom a RIPE Atlas compliant traceroute."
+)]
+struct TraceRouteOpt {
     /// Use IPv4 (default)
-    #[structopt(short="4",parse(try_from_str = "parse_af"))]
-    V4: af, // af: AddressFamily ,src_addr: SockAddr,
+    // #[structopt(short = "4", parse(try_from_str = "parse_af"))]
+    // v4: Option<traceroute::AddressFamily>, // af: AddressFamily ,src_addr: SockAddr,
+    #[structopt(short = "4")]
+    v4: bool,
     /// Use IPv6
-    #[structopt(short="6",parse(try_from_str = "parse_af"))]
-    V6: af, // af: AddressFamily,
+    // #[structopt(short = "6", parse(try_from_str = "parse_af"))]
+    // v6: Option<traceroute::AddressFamily>, // af: AddressFamily,
+    #[structopt(short = "6")]
+    v6: bool,
     /// Don't fragment
-    F: bool, // NOT IMPLEMENTED
+    // F: bool, // NOT IMPLEMENTED
     /// Use ICMP protocol for outgoing packet
-    I: bool, // proto: TraceProtocol::ICMP,
+    #[structopt(short = "I")]
+    proto_icmp: bool, // proto: TraceProtocol::ICMP,
     /// Name resolution during each run
-    r: bool, // NOT IMPLEMENTED
+    // r: bool, // NOT IMPLEMENTED
     /// Use UDP protocol for outgoing packet
-    U: bool, // proto: TraceProtocol::UDP,
+    #[structopt(short = "U")]
+    proto_udp: bool, // proto: TraceProtocol::UDP,
     /// Use TCP protocol for outgoing packet (SYN packet)
-    T: bool, // proto: TraceProtocol::TCP,
+    #[structopt(short = "T")]
+    proto_tcp: bool, // proto: TraceProtocol::TCP,
     /// Enable Paris traceroute
-    a: bool, // -a <paris modulus> NOT IMPLEMENTED
+    // a: bool, // -a <paris modulus> NOT IMPLEMENTED
     /// packets per hop
-    c: u8, // DEFAULT_TRT_COUNT
+    #[structopt(short = "c", long = "trt_count", name = "packets per hop")]
+    packets_per_hop: Option<u8>, // DEFAULT_TRT_COUNT
     /// starting hop
-    f: u8, // START_TTL
+    #[structopt(short = "f", name = "start ttl")]
+    start_ttl: Option<u16>, // START_TTL
     /// Gap limit
-    g: u8, // NOT IMPLEMENTED
+    // g: u8, // NOT IMPLEMENTED
     /// Max hops
-    m: u8, // max hops DEFAULT_MAX_HOPS
+    #[structopt(short = "m", long = "max_hops", name = "maximum number of hops")]
+    max_hops: Option<u16>, // max hops DEFAULT_MAX_HOPS
     /// Destination port
-    p: u16, // dst_addr
+    #[structopt(short = "p", long = "port", name = "destination port")]
+    tcp_dest_port: Option<u16>, // dst_addr
     /// No Reply Timeout (ms)
-    w: u16, // timeout
+    #[structopt(short = "w", long = "timeout", name = "timeout")]
+    timeout: Option<i64>, // timeout
     /// Duplicate timeout (ms)
-    z: u16, // NOT IMPLEMENTED
+    // z: u16, // NOT IMPLEMENTED
     /// Atlas Measurement ID
-    A: u16, // ident
+    #[structopt(short = "A", long = "uuid", name = "RIPE Atlas unique identifier")]
+    A: Option<String>, // ident
     /// Add IPv6 Destination Option this size
-    D: u8, // NOT IMPLEMENTED,
+    // D: u8, // NOT IMPLEMENTED,
     /// Add IPv6 Hop-by-hop Option this size"
-    H: u8,
-    /// Name of output file 
-    #[structopt(parse(from_os_str))]
+    // H: u8,
+    /// Name of output file
+    #[structopt(short = "O", parse(from_os_str))]
     O: Option<PathBuf>,
     /// Size of packet
-    S: u8, // NOT IMPLEMENTED
+    // S: u8, // NOT IMPLEMENTED
     /// Destination address or hostname
+    #[structopt(name = "destination address")]
     dst_addr: String, //to SocketAddr,
 }
 
 fn main() {
     println!("type: traceroute");
-    let mut args = env::args();
-    let ip: String = args.nth(1).unwrap() + ":0";
+    let opt = TraceRouteOpt::from_args();
+    println!("{:?}", opt);
+    // let mut args = env::args();
+    let ip: String = opt.dst_addr + ":0";
     let addr: &str = &ip;
 
-    println!("dst_name: {}", env::args().nth(1).unwrap());
+    let af: Result<Option<traceroute::AddressFamily>, &str> = match (opt.v4, opt.v6) {
+        (true, false) => Ok(Some(traceroute::AddressFamily::V4)),
+        (false, true) => Ok(Some(traceroute::AddressFamily::V6)),
+        (false, false) => Ok(None),
+        _ => Err("cannot specify both address families"),
+    };
+
+    let proto: Result<traceroute::TraceProtocol, &str> =
+        match (opt.proto_icmp, opt.proto_udp, opt.proto_tcp) {
+            (true, false, false) => Ok(traceroute::TraceProtocol::ICMP),
+            (false, true, false) => Ok(traceroute::TraceProtocol::UDP),
+            (false, false, true) => Ok(traceroute::TraceProtocol::TCP),
+            (false, false, false) => Ok(DEFAULT_TRACE_PROTOCOL),
+            _ => Err("cannot specify more than one protocol")
+        };
+
+    let spec = traceroute::TraceRouteSpec {
+        proto: proto.unwrap(),
+        af: af.unwrap(),
+        start_ttl: match opt.start_ttl {
+            Some(sl) => sl,
+            None => DEFAULT_START_TTL,
+        },
+        max_hops: match opt.max_hops {
+            Some(mh) => mh,
+            None => DEFAULT_MAX_HOPS,
+        },
+        packets_per_hop: match opt.packets_per_hop {
+            Some(pph) => pph,
+            None => DEFAULT_PACKETS_PER_HOP,
+        },
+        tcp_dest_port: match opt.tcp_dest_port {
+            Some(p) => p,
+            None => DEFAULT_TCP_DEST_PORT,
+        },
+        timeout: match opt.timeout {
+            Some(t) => t,
+            None => DEFAULT_PACKET_IN_TIMEOUT,
+        },
+        uuid: "ATLAS-TRACE-EX".to_string(),
+    };
+    // println!("dst_name: {}", env::args().nth(1).unwrap());
 
     // TODO: no improvement at all,
     // in fact swallows the error message while still panicing.
-    match traceroute::start(addr) {
+    match traceroute::sync_start_with_timeout(addr, &spec) {
         Ok(t) => {
             for result in t {
                 match &result {
                     Err(e) => {
-                        println!("{}", e);
+                        println!("{:?}", e);
                     }
-                    Ok(r) => { println!("{}", serde_json::to_string_pretty(r).unwrap()) },
+                    Ok(r) => println!("{}", serde_json::to_string_pretty(r).unwrap()),
                 }
                 // println!("{}", serde_json::to_string_pretty(&result).unwrap());
             }
