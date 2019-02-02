@@ -780,13 +780,6 @@ impl<'a> Iterator for TraceRoute<'a> {
     }
 }
 
-/// Do traceroute
-// pub fn start<'a, T: ToSocketAddrs>(address: T, spec: TraceRouteSpec) -> io::Result<TraceRoute<'a>> {
-//     sync_start_with_timeout(address, spec)
-
-//     // address, Duration::seconds(PACKET_IN_TIMEOUT))
-// }
-
 /// Run-of-the-mill icmp ipv4/ipv6 traceroute implementation (for now)
 // Completely synchronous. Every packet that's send will trigger a wait for its return
 pub fn sync_start_with_timeout<'a, T: ToSocketAddrs>(
