@@ -794,12 +794,23 @@ pub fn sync_start_with_timeout<'a, T: ToSocketAddrs>(
     };
 
     let mut addr_iter = address.to_socket_addrs()?;
-    let mut dst_addr = match addr_iter.next() {
-        Some(addr) => addr,
-        None => panic!("Cannot parse the resolved IP address(es) for requested hostname"),
+
+    let mut dst_addr = match spec.af {
+        // No address family was specified by the user
+        // so get the first resolved address we can get our hands on.
+        // That address will determine the address family.
+        None => match addr_iter.next() {
+            Some(addr) => addr,
+            None => panic!("Cannot parse the resolved IP address(es) for requested hostname"),
+        },
+        Some(af) => addr_iter.find(|addr| match (addr,af) {
+            (SocketAddr::V4(_), AddressFamily::V4) => true,
+            (SocketAddr::V6(_), AddressFamily::V6) => true,
+            _ => false}
+        ).expect("Cannot match requested address family and destination address.")
     };
 
-    println!("{:?}", &dst_addr);
+    println!("dst addr {:?}", &dst_addr);
     // TODO: for TCP there also needs to be a socket listening to Protocol TCP
     // to catch the SYN+ACK packet coming in from the destination.
     // which seems impossible to do in BSDs, so they would need to be caught at
@@ -807,30 +818,23 @@ pub fn sync_start_with_timeout<'a, T: ToSocketAddrs>(
     // all OSes (since we depend on lipcap anyway)?
 
     let src_addr;
-    let infer_af: AddressFamily;
     let socket_in;
+    let af: AddressFamily;
 
     // figure out the address family from the destination address.
     match dst_addr {
         SocketAddr::V4(_) => {
             src_addr = get_sock_addr(&AddressFamily::V4, SRC_BASE_PORT);
-            infer_af = AddressFamily::V4;
+            af = AddressFamily::V4;
             socket_in = Socket::new(Domain::ipv4(), Type::raw(), Some(<Protocol>::icmpv4()))?;
             dst_addr.set_port(DST_BASE_PORT)
         }
         SocketAddr::V6(_) => {
             src_addr = get_sock_addr(&AddressFamily::V6, SRC_BASE_PORT);
-            infer_af = AddressFamily::V6;
+            af = AddressFamily::V6;
             socket_in = Socket::new(Domain::ipv6(), Type::raw(), Some(<Protocol>::icmpv6()))?;
             dst_addr.set_port(DST_BASE_PORT)
         }
-    };
-
-    // override inferred af from destination address with the user-set option
-    // if available
-    let af: AddressFamily = match spec.af {
-        Some(af) => af,
-        None => infer_af
     };
 
     socket_in.set_reuse_address(true).unwrap();
