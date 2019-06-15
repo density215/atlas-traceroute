@@ -406,6 +406,19 @@ impl<'a> TraceRoute<'a> {
     ) -> Result<(), Error> {
         // We don't have any ICMP header data right now
         // So we're only using the last 4 bytes in the payload to compare.
+        println!("wrapped ip pack length :{}", wrapped_ip_packet.len());
+        println!("packet out length: {}", packet_out.len());
+
+        // in TCP we witness that reflected packets are someitmes cutoff after 12 bytes,
+        // and filled with zeros up till 4176 bytes (or less).
+        // Another situation is that their lenght might be less than 12 bytes
+        // sent out by us as a packet.
+        // So we're taking *up to* 12 bytes of the reflected packet.
+        let wrapped_ip_snip:&[u8] = match packet_out.len() {
+            l if l > 12 => &wrapped_ip_packet[..12],
+            _ => &wrapped_ip_packet[..packet_out.len()]
+        };
+        
         match &self.spec.proto {
             &TraceProtocol::ICMP if wrapped_ip_packet[4..8] == packet_out[4..8] => Ok(()),
             &TraceProtocol::UDP if wrapped_ip_packet[8..16] == packet_out[..8] => Ok(()),
@@ -432,7 +445,8 @@ impl<'a> TraceRoute<'a> {
                 Ok(())
             }
             &TraceProtocol::UDP if icmp_packet_in[28..36] == wrapped_ip_packet[..8] => Ok(()),
-            &TraceProtocol::TCP if wrapped_ip_packet[..12] == packet_out[..12] => Ok(()),
+            // see the above comment about cutting off of reflected ip packets
+            &TraceProtocol::TCP if wrapped_ip_snip == &packet_out[..wrapped_ip_snip.len()] => Ok(()),
             _ => {
                 print!(
                     "packet out {:?}: {:02x}",
