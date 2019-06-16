@@ -164,11 +164,13 @@ pub enum TraceProtocol {
 // As always turns out that the compiler is right,
 // this is actually better.
 pub struct HopDuration(time::Duration);
+#[derive(Debug)]
+pub struct FromIp(SocketAddr);
 
 #[derive(Debug, Serialize)]
 pub struct TraceHop {
     /// IP address of the hophost
-    pub from: SocketAddr,
+    pub from: FromIp,
     /// The resolved hostname
     pub hop_name: String,
     /// Time-to-live for this hop
@@ -177,6 +179,16 @@ pub struct TraceHop {
     pub rtt: HopDuration,
     /// Size of the reply
     pub size: usize,
+}
+
+impl Serialize for FromIp {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        {
+            let FromIp(s) = self;
+            serializer.serialize_str(&s.ip().to_string())
+        }
 }
 
 impl Serialize for HopDuration {
@@ -734,7 +746,7 @@ impl<'a> TraceRoute<'a> {
                                 hop = HopOrError::HopOk(TraceHop {
                                     ttl: ttl_in,
                                     size: packet_len,
-                                    from: host,
+                                    from: FromIp(host),
                                     hop_name: lookup_addr(&host.ip()).unwrap(),
                                     rtt: HopDuration(rtt),
                                 });
@@ -774,7 +786,7 @@ impl<'a> TraceRoute<'a> {
                                 hop = HopOrError::HopOk(TraceHop {
                                     ttl: ttl_in,
                                     size: packet_len,
-                                    from: host,
+                                    from: FromIp(host),
                                     hop_name: lookup_addr(&host.ip()).unwrap(),
                                     rtt: HopDuration(rtt),
                                 });
