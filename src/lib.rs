@@ -106,6 +106,14 @@ pub struct HopTimeOutError {
     pub column: usize,
 }
 
+pub type ResultVec = Vec<HopOrError>;
+
+#[derive(Debug)]
+pub enum HopOrError {
+    HopOk(TraceHop),
+    HopError(HopTimeOutError)
+}
+
 impl fmt::Display for HopTimeOutError {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(f, "* {}", self.message)
@@ -123,13 +131,25 @@ impl Serialize for HopTimeOutError {
     }
 }
 
+impl Serialize for HopOrError {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::ser::Serializer,
+    {
+        match *self {
+            HopOrError::HopOk(ref hop) => serializer.serialize_newtype_struct("TraceHop", hop),
+            HopOrError::HopError ( ref err )=> serializer.serialize_newtype_struct("TraceHop", err)
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct TraceResult {
     // This is a global error for all hops in this sequence
     #[serde(skip_serializing)]
     pub error: io::Result<Error>,
     pub hop: u8,
-    pub result: Vec<Result<TraceHop, HopTimeOutError>>,
+    pub result: Vec<HopOrError>,
 }
 
 #[derive(Debug)]
@@ -230,9 +250,9 @@ impl<'a> TraceRoute<'a> {
         //socket_out.bind(&self.src_addr).unwrap();
         //let dst_addr = <SockAddr>::from(self.dst_addr);
         //socket_out.connect(&dst_addr).unwrap();
-        socket_out
-            .set_nonblocking(true)
-            .expect("Cannot set socket to blocking mode");
+        // socket_out
+        //     .set_nonblocking(false)
+        //     .expect("Cannot set socket to blocking mode");
         // socket_out
         //     .set_read_timeout(Some(Duration::seconds(PACKET_IN_TIMEOUT).to_std().unwrap()))
         //     .expect("Cannot set read timeout on socket");
@@ -409,7 +429,7 @@ impl<'a> TraceRoute<'a> {
         println!("wrapped ip pack length :{}", wrapped_ip_packet.len());
         println!("packet out length: {}", packet_out.len());
 
-        // in TCP we witness that reflected packets are someitmes cutoff after 12 bytes,
+        // in TCP we witness that reflected packets are sometimes cutoff after 12 bytes,
         // and filled with zeros up till 4176 bytes (or less).
         // Another situation is that their lenght might be less than 12 bytes
         // sent out by us as a packet.
@@ -531,7 +551,10 @@ impl<'a> TraceRoute<'a> {
                     packet_out,
                 )
             }
-            _ => Err(Error::new(ErrorKind::Other, "unidentified packet type")),
+            _ => { 
+                    println!("unknown : {:02x}", &ip_payload.as_hex());
+                    Err(Error::new(ErrorKind::Other, "unidentified packet type - ipv4"))
+                },
         }
     }
 
@@ -575,8 +598,9 @@ impl<'a> TraceRoute<'a> {
                 )
             }
             _ => {
-                println!("{:?}", icmp_packet_in.get_icmpv6_type());
-                Err(Error::new(ErrorKind::Other, "unidentified packet type"))
+                println!("unknown : {:?}", icmp_packet_in.get_icmpv6_type());
+                println!("64b of icmp packet in : {:02x}", &icmp_packet_in.payload()[..64].as_hex());
+                Err(Error::new(ErrorKind::Other, "unidentified packet type - ipv6"))
             }
         }
     }
@@ -607,14 +631,14 @@ impl<'a> TraceRoute<'a> {
         };
 
         self.ttl += 1;
-        let mut trace_hops: Vec<Result<TraceHop, HopTimeOutError>> =
+        let mut trace_hops: Vec<HopOrError> =
             Vec::with_capacity(self.spec.packets_per_hop as usize);
         let socket_out = self.create_socket(true);
         socket_out.set_reuse_address(true)?;
         let src = get_sock_addr(&self.af, self.ident);
 
         //socket_out.bind(&src).unwrap();
-        socket_out.set_nonblocking(true).unwrap();
+        // socket_out.set_nonblocking(true).unwrap();
 
         'trt: for count in 0..self.spec.packets_per_hop {
             let ttl = self.set_ttl(&socket_out);
@@ -651,11 +675,18 @@ impl<'a> TraceRoute<'a> {
 
             // If hop is not overwritten with a TraceHop struct within the while loop below
             // then the result will be a timed-out error
-            let mut hop: Result<TraceHop, HopTimeOutError> = Err(HopTimeOutError {
+            let mut hop: HopOrError = HopOrError::HopError(HopTimeOutError {
                 message: "hop timeout".to_string(),
                 line: 0,
                 column: 0,
             });
+
+            // Set the read timeout on the socket will break out of the
+            // 'timeout loop down here. We will need that if we're infering
+            // timeouts while using a blocking mode socket.
+            // Using nonblocking mode will have CPU go to 100%, unless we use epoll
+            // which is in turn heavily platform specific, so we prefer blocking.
+            self.socket_in.set_read_timeout(Some(Duration::milliseconds(self.spec.timeout).to_std().unwrap()));
 
             'timeout: while SteadyTime::now() < start_time + Duration::seconds(self.spec.timeout) {
                 // let read_tcp = match socket_out.recv_from(buf_in.as_mut_slice()) {
@@ -700,7 +731,7 @@ impl<'a> TraceRoute<'a> {
                         match self.analyse_v6_payload(&packet_out, &icmp_packet_in) {
                             Ok(()) => {
                                 let host = SocketAddr::V6(sender.as_inet6().unwrap());
-                                hop = Ok(TraceHop {
+                                hop = HopOrError::HopOk(TraceHop {
                                     ttl: ttl_in,
                                     size: packet_len,
                                     from: host,
@@ -717,7 +748,7 @@ impl<'a> TraceRoute<'a> {
                             {
                                 println!("*");
                                 println!("{:?}", err);
-                                hop = Err(HopTimeOutError {
+                                hop = HopOrError::HopError(HopTimeOutError {
                                     message: "*".to_string(),
                                     line: 0,
                                     column: 0,
@@ -727,7 +758,7 @@ impl<'a> TraceRoute<'a> {
                                 // other packet that might come in.
                                 continue 'timeout;
                             }
-                            Err(e) => trace_hops.push(Err(HopTimeOutError {
+                            Err(e) => trace_hops.push(HopOrError::HopError(HopTimeOutError {
                                 message: e.to_string(),
                                 line: 0,
                                 column: 0,
@@ -740,7 +771,7 @@ impl<'a> TraceRoute<'a> {
                         match self.analyse_v4_payload(&packet_out, &icmp_packet_in, &ip_payload) {
                             Ok(()) => {
                                 let host = SocketAddr::V4(sender.as_inet().unwrap());
-                                hop = Ok(TraceHop {
+                                hop = HopOrError::HopOk(TraceHop {
                                     ttl: ttl_in,
                                     size: packet_len,
                                     from: host,
@@ -752,7 +783,7 @@ impl<'a> TraceRoute<'a> {
                             err => {
                                 println!("* wut?");
                                 println!("{:?}", err);
-                                hop = Err(HopTimeOutError {
+                                hop = HopOrError::HopError(HopTimeOutError {
                                     message: "* wut?".to_string(),
                                     line: 0,
                                     column: 0,
@@ -853,7 +884,7 @@ pub fn sync_start_with_timeout<'a, T: ToSocketAddrs>(
 
     socket_in.set_reuse_address(true).unwrap();
     socket_in
-        .set_nonblocking(true)
+        .set_nonblocking(false)
         .expect("Cannot set socket to blocking mode");
 
     println!("af: IP{:?}", af);
