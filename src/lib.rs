@@ -7,6 +7,7 @@ extern crate pnet;
 extern crate rand;
 extern crate socket2;
 extern crate time;
+extern crate byteorder;
 
 use std::fmt;
 use std::iter::Iterator;
@@ -46,6 +47,7 @@ use time::{Duration, SteadyTime};
 use dns_lookup::lookup_addr;
 // only used for debug printing packets
 use hex_slice::AsHex;
+use byteorder::{NetworkEndian, ByteOrder};
 
 const MAX_PACKET_SIZE: usize = 4096 + 128;
 const ICMP_HEADER_LEN: usize = 8;
@@ -438,6 +440,8 @@ impl<'a> TraceRoute<'a> {
     ) -> Result<(), Error> {
         // We don't have any ICMP header data right now
         // So we're only using the last 4 bytes in the payload to compare.
+        println!("wrapped ip packet: {:02x}", wrapped_ip_packet[..16].as_hex());
+        println!("packet out: {:02x}", packet_out.as_hex());
         println!("wrapped ip pack length :{}", wrapped_ip_packet.len());
         println!("packet out length: {}", packet_out.len());
 
@@ -475,8 +479,26 @@ impl<'a> TraceRoute<'a> {
                 );
 
                 Ok(())
-            }
-            &TraceProtocol::UDP if icmp_packet_in[28..36] == wrapped_ip_packet[..8] => Ok(()),
+            },
+            // &TraceProtocol::UDP if icmp_packet_in[28..36] == wrapped_ip_packet[..8] => { 
+            //     println!("icmp packet in: {:02x}", icmp_packet_in[..64].as_hex());    
+            //     Ok(())
+            // },
+
+            // check to see if the source ports on the packet out and the reflected packet
+            // match up
+             &TraceProtocol::UDP if wrapped_ip_packet[2..4] == packet_out[2..4] => { 
+                println!("icmp packet in: {:02x}", icmp_packet_in[..64].as_hex());    
+                Ok(())
+            },
+            // tnis might be a hop from an earlier probe, so then
+            // dst_port should be higher than or equal to the udp base port
+            // (a constant for now), but lower than UDP_BASE_PORT + this hopnr
+            &TraceProtocol::UDP if NetworkEndian::read_u16(&wrapped_ip_packet[2..4]) >= DST_BASE_PORT && 
+            NetworkEndian::read_u16(&wrapped_ip_packet[2..4]) <= DST_BASE_PORT + 0xff => {
+                println!("wrong hopno! earlier hop");
+                Ok(())
+            },
             // see the above comment about cutting off of reflected ip packets
             &TraceProtocol::TCP if wrapped_ip_snip == &packet_out[..wrapped_ip_snip.len()] => Ok(()),
             _ => {
@@ -666,6 +688,7 @@ impl<'a> TraceRoute<'a> {
             //     self.seq_num,
             //     &[self.ident].as_hex()
             // );
+            println!("identifier: {:02x}",&[self.ident].as_hex());
 
             let dst_port_for_hop = match self.spec.proto {
                 TraceProtocol::ICMP => self.seq_num + DST_BASE_PORT,
