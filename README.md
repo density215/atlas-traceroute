@@ -14,9 +14,10 @@ This re-implentation has the following objectives:
 
 implemented features right now:
 
-- ICMP type
+- ICMP/UDP/TCP type
 - dual-stack IPv4/6
 - hostname lookups
+- classic traceroute (paris traceroute also for UDP)
 - interface auto-detection
 
 everything untested. everything still runs synchronised.
