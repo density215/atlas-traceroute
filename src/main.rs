@@ -1,5 +1,4 @@
 #[macro_use]
-
 extern crate structopt;
 extern crate serde;
 extern crate serde_json;
@@ -8,6 +7,12 @@ extern crate traceroute;
 use std::env;
 use std::path::PathBuf;
 use structopt::StructOpt;
+use std::str::FromStr;
+use std::num::ParseIntError;
+
+// „I prefer zeroes on the loose
+// to those lined up behind a cipher.‟
+// Wisława Szymborska - “Possibilities”
 
 /*
  * Copyright (c) 2013 RIPE NCC <atlas@ripe.net>
@@ -54,6 +59,7 @@ const DEFAULT_TRACE_PROTOCOL: traceroute::TraceProtocol = traceroute::TraceProto
 const DEFAULT_TCP_DEST_PORT: u16 = 0x5000; // port 0x50 (80) is the actual UI default in Atlas.
 const DEFAULT_PACKETS_PER_HOP: u8 = 3;
 const DEFAULT_PACKET_IN_TIMEOUT: i64 = 1;
+const DEFAULT_PARIS_ID: u8 = 0x0F;
 const DEFAULT_START_TTL: u16 = 0; // yeah,yeah, wasting a byte here, but we're going to sum this with DST_BASE_PORT
 const DEFAULT_MAX_HOPS: u16 = 255; // max hops to hopperdehop
 
@@ -94,8 +100,9 @@ struct TraceRouteOpt {
     /// Use TCP protocol for outgoing packet (SYN packet)
     #[structopt(short = "T")]
     proto_tcp: bool, // proto: TraceProtocol::TCP,
-    /// Enable Paris traceroute
-    // a: bool, // -a <paris modulus> NOT IMPLEMENTED
+    /// Enable Paris traceroute, with optional paris id
+    #[structopt(short = "a", long = "paris", name = "enable paris traceroute" )]
+    paris: Option<Option<u8>>, // DEFAULT_PARIS_ID
     /// packets per hop
     #[structopt(short = "c", long = "trt_count", name = "packets per hop")]
     packets_per_hop: Option<u8>, // DEFAULT_TRT_COUNT
@@ -170,6 +177,10 @@ fn main() {
         packets_per_hop: match opt.packets_per_hop {
             Some(pph) => pph,
             None => DEFAULT_PACKETS_PER_HOP,
+        },
+        paris: match opt.paris {
+            Some(paris_id) => Some(paris_id.unwrap_or(DEFAULT_PARIS_ID)),
+            None => None
         },
         tcp_dest_port: match opt.tcp_dest_port {
             Some(p) => p,

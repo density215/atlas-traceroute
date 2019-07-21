@@ -76,6 +76,7 @@ pub struct TraceRouteSpec {
     pub af: Option<AddressFamily>, // might be empty, but could then be inferred from the dst_addr (if it's an IP address)
     pub start_ttl: u16,
     pub max_hops: u16,
+    pub paris: Option<u8>,
     pub packets_per_hop: u8,
     pub tcp_dest_port: u16,
     pub timeout: i64,
@@ -312,18 +313,61 @@ impl<'a> TraceRoute<'a> {
                     .expect("invalid destination address")
                     .ip()
                     .clone();
-                let udp_buffer = vec![00u8; UDP_HEADER_LEN];
+                let udp_buffer = vec![0x00; UDP_HEADER_LEN + 0x02];
                 let mut udp_packet = MutableUdpPacket::owned(udp_buffer).unwrap();
-                udp_packet.set_source(self.ident);
-                udp_packet.set_destination(self.seq_num + DST_BASE_PORT);
-                udp_packet.set_length(0x00);
+                udp_packet.set_source(SRC_BASE_PORT);
+                match self.spec.paris {
+                    // 'classic' traceroute
+                    // uses the dst_port to fingerprint returning ICMP packets.
+                    // So for each hop the dst_port is increased with one,
+                    // so we can differentiate between them.
+                    None => {
+                        println!("classic traceroute");
+                        udp_packet.set_destination(self.seq_num + DST_BASE_PORT);
+                    }
+                    // paris traceroute
+                    // paris traceroute tries to keep the five
+                    // tos, proto, src_addr, dst_addr, src_port, dst_port as
+                    // invariants between hops for UDP (TCP and ICMP traceroutes work diffrerently).
+                    // So this rules out the dst_port trick that 'classic' uses.
+                    // As an alternative strategy paris traceroute tries to vary the
+                    // checksum field between hops, thus using it as an identifier for a hop.
+                    // As a consequence the payload needs to be calculated to fit the desired checksum.
+                    //
+                    // Since I have no desire to reimplement the UDP checksum from scratch, let alone
+                    // implement the reverse algorithm (yeah, I know, not hard, one's complement and carry bit, yada, yada),
+                    // I've decided to first calculate a temporary checksum with the payload set to zero.
+                    // Then I can calculate by how much
+                    // the payload needs to increased to offset to the desired the checksum.
+                    // This is actually pretty easy, because if the pauyload is increased by 0x01,
+                    // the checksum goes down by 0x01...
+                    Some(paris_id) => { 
+                        udp_packet.set_destination(DST_BASE_PORT);
+                        // udp_packet.set_length(0x0a);
+                        udp_packet.set_payload(&vec![paris_id, 0x00]);
+                        let temp_checksum = ipv4_checksum(
+                            &udp_packet.to_immutable(),
+                            &src_ip,
+                            &dst_ip
+                        ) - 0x0a - self.seq_num;
+                        println!("paris traceroute: {:?}", self.spec.paris);
+                        println!("temp checksum: {:02x}", temp_checksum);
+                        udp_packet.set_payload(&temp_checksum.to_be_bytes());
+                    }
+                }
+                udp_packet.set_source(SRC_BASE_PORT);
+                // udp_packet.set_destination(self.seq_num + DST_BASE_PORT);
+                // udp_packet.set_destination(DST_BASE_PORT);
+                udp_packet.set_length(0x0a);
+                // udp_packet.set_payload(&vec![0x6c,0x01]);
                 //The `official` udp checksum
                 let udp_checksum = ipv4_checksum(
-                    &UdpPacket::new(&udp_packet.packet()).unwrap(),
+                    &udp_packet.to_immutable(),
                     &src_ip,
                     &dst_ip,
                 );
                 udp_packet.set_checksum(udp_checksum);
+                println!("udp checksum: {:02x}", udp_checksum);
                 udp_packet.packet().to_owned()
             }
             AddressFamily::V6 => {
@@ -348,6 +392,7 @@ impl<'a> TraceRoute<'a> {
                     &dst_ip,
                 );
                 udp_packet.set_checksum(udp_checksum);
+                println!("udp checksum: {}", udp_checksum);
                 udp_packet.packet().to_owned()
             }
         }
@@ -440,14 +485,14 @@ impl<'a> TraceRoute<'a> {
     ) -> Result<(), Error> {
         // We don't have any ICMP header data right now
         // So we're only using the last 4 bytes in the payload to compare.
-        println!("wrapped ip packet: {:02x}", wrapped_ip_packet[..16].as_hex());
+        println!("wrapped ip packet: {:02x}", wrapped_ip_packet[..32].as_hex());
         println!("packet out: {:02x}", packet_out.as_hex());
         println!("wrapped ip pack length :{}", wrapped_ip_packet.len());
         println!("packet out length: {}", packet_out.len());
 
         // in TCP we witness that reflected packets are sometimes cutoff after 12 bytes,
         // and filled with zeros up till 4176 bytes (or less).
-        // Another situation is that their lenght might be less than 12 bytes
+        // Another situation is that their length might be less than 12 bytes
         // sent out by us as a packet.
         // So we're taking *up to* 12 bytes of the reflected packet.
         let wrapped_ip_snip:&[u8] = match packet_out.len() {
@@ -692,7 +737,14 @@ impl<'a> TraceRoute<'a> {
 
             let dst_port_for_hop = match self.spec.proto {
                 TraceProtocol::ICMP => self.seq_num + DST_BASE_PORT,
-                TraceProtocol::UDP => self.seq_num + DST_BASE_PORT,
+                // Increase the port number only for
+                // classic traceroute for UDP,
+                // paris traceroute uses the UDP checksum to identify
+                // packets
+                TraceProtocol::UDP => match self.spec.paris  { 
+                    None => self.seq_num + DST_BASE_PORT,
+                    Some(paris_id) => DST_BASE_PORT
+                },
                 TraceProtocol::TCP => self.spec.tcp_dest_port,
             };
             self.dst_addr.set_port(dst_port_for_hop);
