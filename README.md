@@ -28,4 +28,4 @@ I am not supplying binaries for any platforms anytime soon.
 So you'll have to have an up-to-date Rust installation, probably set up with `rustup`.
 
 Relies on rust-nightly (`rustup install nightly` and `rustup default nightly`).
-Relies on upstream changes in the crates libc, socket2 and pnet. I will make a PR for those once I've made tests for the changes.
+Relies on upstream changes in crate pnet. I will make a PR for those once I've made tests for the changes.
