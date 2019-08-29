@@ -87,12 +87,12 @@ struct TraceRouteOpt {
     // v6: Option<traceroute::AddressFamily>, // af: AddressFamily,
     #[structopt(short = "6")]
     v6: bool,
-    /// Don't fragment
+    // Don't fragment
     // F: bool, // NOT IMPLEMENTED
     /// Use ICMP protocol for outgoing packet
     #[structopt(short = "I")]
     proto_icmp: bool, // proto: TraceProtocol::ICMP,
-    /// Name resolution during each run
+    // Name resolution during each run
     // r: bool, // NOT IMPLEMENTED
     /// Use UDP protocol for outgoing packet
     #[structopt(short = "U")]
@@ -109,7 +109,7 @@ struct TraceRouteOpt {
     /// starting hop
     #[structopt(short = "f", name = "start ttl")]
     start_ttl: Option<u16>, // START_TTL
-    /// Gap limit
+    // Gap limit
     // g: u8, // NOT IMPLEMENTED
     /// Max hops
     #[structopt(short = "m", long = "max_hops", name = "maximum number of hops")]
@@ -120,23 +120,29 @@ struct TraceRouteOpt {
     /// No Reply Timeout (ms)
     #[structopt(short = "w", long = "timeout", name = "timeout")]
     timeout: Option<i64>, // timeout
-    /// Duplicate timeout (ms)
+    // Duplicate timeout (ms)
     // z: u16, // NOT IMPLEMENTED
     /// Atlas Measurement ID
     #[structopt(short = "A", long = "uuid", name = "RIPE Atlas unique identifier")]
     A: Option<String>, // ident
-    /// Add IPv6 Destination Option this size
+    // Add IPv6 Destination Option this size
     // D: u8, // NOT IMPLEMENTED,
-    /// Add IPv6 Hop-by-hop Option this size"
+    // Add IPv6 Hop-by-hop Option this size"
     // H: u8,
     /// Name of output file
     #[structopt(short = "O", parse(from_os_str))]
     O: Option<PathBuf>,
-    /// Size of packet
+    // Size of packet
     // S: u8, // NOT IMPLEMENTED
     /// Destination address or hostname
     #[structopt(name = "destination address")]
     dst_addr: String, //to SocketAddr,
+    /// Public IP address of the interface used (in case of NAT) to use in checksum calculation
+    #[structopt(short = "i", long = "publicip", name = "public ip address")]
+       // -- this traceroute implementation specific options (not in atlas probes) --
+    public_ip: Option<String>,
+    #[structopt(short = "v", long = "verbose", name = "print packets breakdown")]
+    verbose: bool
 }
 
 fn main() {
@@ -191,6 +197,8 @@ fn main() {
             None => DEFAULT_PACKET_IN_TIMEOUT,
         },
         uuid: "ATLAS-TRACE-EX".to_string(),
+        public_ip: opt.public_ip,
+        verbose: opt.verbose
     };
     // println!("dst_name: {}", env::args().nth(1).unwrap());
 
@@ -203,12 +211,20 @@ fn main() {
                     Err(e) => {
                         println!("{:?}", e);
                     }
-                    Ok(r) => println!("{}", serde_json::to_string_pretty(r).unwrap()),
+                    Ok(r) => { 
+                        println!("{}", serde_json::to_string_pretty(r).unwrap());
+                        if spec.verbose { 
+                            println!("END HOP {}", r.hop);
+                            println!("==============");
+                            println!("");
+                        };
+                    },
                 }
                 // println!("{}", serde_json::to_string_pretty(&result).unwrap());
             }
         }
         Err(err) => {
+
             println!("{}", err);
         }
     };

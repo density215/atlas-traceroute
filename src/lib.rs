@@ -11,6 +11,7 @@ extern crate byteorder;
 
 use std::fmt;
 use std::iter::Iterator;
+use std::str::FromStr;
 
 #[macro_use]
 extern crate serde_derive;
@@ -81,6 +82,9 @@ pub struct TraceRouteSpec {
     pub tcp_dest_port: u16,
     pub timeout: i64,
     pub uuid: String,
+    // this implementation specific options
+    pub public_ip: Option<String>,
+    pub verbose: bool
 }
 
 #[derive(Debug)]
@@ -252,7 +256,7 @@ impl<'a> TraceRoute<'a> {
         let sock_type = match (out, &self.spec.proto) {
             (false, _) => Type::raw(),
             (true, &TraceProtocol::ICMP) => Type::raw(),
-            (true, &TraceProtocol::UDP) => Type::dgram(),
+            (true, &TraceProtocol::UDP) => Type::raw(), // was dgram(), but that generates the udp packet itself and apparantly uses our carefully crafted package as payload
             (true, &TraceProtocol::TCP) => Type::raw(),
         };
 
@@ -343,15 +347,17 @@ impl<'a> TraceRoute<'a> {
                     // the checksum goes down by 0x01...
                     Some(paris_id) => { 
                         udp_packet.set_destination(DST_BASE_PORT);
-                        // udp_packet.set_length(0x0a);
-                        udp_packet.set_payload(&vec![paris_id, 0x00]);
+                        udp_packet.set_length(0x00);
+                        udp_packet.set_payload(&vec![0x00; 2]);
                         let temp_checksum = ipv4_checksum(
                             &udp_packet.to_immutable(),
                             &src_ip,
                             &dst_ip
                         ) - 0x0a - self.seq_num;
-                        println!("paris traceroute: {:?}", self.spec.paris);
-                        println!("temp checksum: {:02x}", temp_checksum);
+                        if self.spec.verbose {
+                            println!("paris traceroute: {:?}", self.spec.paris);
+                            println!("temp checksum (udp payload): {:02x}", temp_checksum);
+                        }
                         udp_packet.set_payload(&temp_checksum.to_be_bytes());
                     }
                 }
@@ -367,7 +373,9 @@ impl<'a> TraceRoute<'a> {
                     &dst_ip,
                 );
                 udp_packet.set_checksum(udp_checksum);
-                println!("udp checksum: {:02x}", udp_checksum);
+                if self.spec.verbose {
+                    println!("udp checksum: {:02x}", udp_checksum);
+                }
                 udp_packet.packet().to_owned()
             }
             AddressFamily::V6 => {
@@ -392,7 +400,9 @@ impl<'a> TraceRoute<'a> {
                     &dst_ip,
                 );
                 udp_packet.set_checksum(udp_checksum);
-                println!("udp checksum: {}", udp_checksum);
+                if self.spec.verbose {
+                    println!("udp checksum: {}", udp_checksum);
+                }
                 udp_packet.packet().to_owned()
             }
         }
@@ -459,7 +469,21 @@ impl<'a> TraceRoute<'a> {
     }
 
     fn unwrap_payload_ip_packet_in(&mut self, buf_in: &[u8]) -> (IcmpPacketIn, u8) {
-        //println!("64b of raw packet in: {:02x}", buf_in[..64].as_hex());
+        // println!("64b of raw packet in: {:02x}", buf_in[..64].as_hex());
+
+        if self.spec.verbose {
+            match &buf_in[0] {
+                0x45 => {
+                    println!("src addr source packet: {:?}", &buf_in[12..16]);
+                    println!("dst addr source packet: {:?}", &buf_in[16..20]);
+                },
+                _ => {
+                    println!("src addr source packet: {:02x}", &buf_in[32..48].as_hex());
+                    println!("dst addr source packet: {:02x}", &buf_in[16..32].as_hex());
+                }
+            };
+        };
+
         let ttl_in: u8;
         match self.af {
             AddressFamily::V4 => {
@@ -485,10 +509,8 @@ impl<'a> TraceRoute<'a> {
     ) -> Result<(), Error> {
         // We don't have any ICMP header data right now
         // So we're only using the last 4 bytes in the payload to compare.
-        println!("wrapped ip packet: {:02x}", wrapped_ip_packet[..32].as_hex());
-        println!("packet out: {:02x}", packet_out.as_hex());
-        println!("wrapped ip pack length :{}", wrapped_ip_packet.len());
-        println!("packet out length: {}", packet_out.len());
+        // println!("wrapped ip packet: {:02x}", wrapped_ip_packet[..32].as_hex());
+       
 
         // in TCP we witness that reflected packets are sometimes cutoff after 12 bytes,
         // and filled with zeros up till 4176 bytes (or less).
@@ -500,52 +522,89 @@ impl<'a> TraceRoute<'a> {
             _ => &wrapped_ip_packet[..packet_out.len()]
         };
         
+        // UDP paris traceroutes have to rely on the checksum of the udp header to match up the
+        // hop number of the packet sent and the icmp packet received. However if our
+        // machine is behind a NAT, then the router performning NAT will very likely rewrite
+        // the UDP checksum of the outhoing packet to match the src IP address of the public ip
+        // address, hence the --publicip option.
+        // This process has no knowledge of the public ip address, so we have to rewrite 
+        // the expected IP packet to have the checksum reflect the public address as set by
+        // the user.
+        // Note that we're also checking if the incoming packet matches with our original
+        // created outgoing packet, in case the user inappropriately set the public_ip property
+        // in the spec. (like there's no NAT after all, or the public ip address is wrong).
+        // Also note that this *only* applies to UDP paris traceroutes and even then only
+        // if you want to sent packets in async/burst mode. In sync mode we sent one packet
+        // and wait for the timeout per hop and matching the source ports in the udp header
+        // is enough.
+
+        let mut udp_packet = MutableUdpPacket::owned(packet_out.to_vec()).unwrap();
+        let expected_udp_packet = match &self.spec.public_ip {
+            Some(public_ip) => {             
+                // let mut udp_packet = MutableUdpPacket::owned(packet_out.to_vec()).unwrap();
+                udp_packet.set_checksum(ipv4_checksum(
+                    &udp_packet.to_immutable(), 
+                    // the public ip address used in NAT
+                    // &<std::net::Ipv4Addr>::new(83,160,104,137),
+                    // the IP of the if to send this packet out (no NAT)
+                    &<std::net::Ipv4Addr>::from_str(public_ip).unwrap(),
+                    // the dst of the traceroute
+                    &<std::net::Ipv4Addr>::new(icmp_packet_in[24], icmp_packet_in[25], icmp_packet_in[26], icmp_packet_in[27])
+                ));
+                udp_packet.packet()
+            },
+            _ => packet_out
+        };
+
+        if self.spec.verbose { debug_print_packet_in(&icmp_packet_in, &packet_out, &expected_udp_packet); };
+
         match &self.spec.proto {
             &TraceProtocol::ICMP if wrapped_ip_packet[4..8] == packet_out[4..8] => Ok(()),
-            &TraceProtocol::UDP if wrapped_ip_packet[8..16] == packet_out[..8] => Ok(()),
-            /* Unfortunately, cheap home routers may
+            /* Some routers may return all of the udp packet we sent, so including the
+             * payload.
+             */
+            &TraceProtocol::UDP if wrapped_ip_packet == expected_udp_packet || wrapped_ip_packet == packet_out => { 
+                if self.spec.verbose { println!("😍 PERFECT MATCH (checksum, payload)"); };
+                Ok(()) 
+            },
+            /* This should be the 'normal' situation, where 8 bytes from the udp packet
+             * we sent are returned, i.e. the udp header
+             */
+            &TraceProtocol::UDP if wrapped_ip_packet[..8] == expected_udp_packet[..8] || wrapped_ip_packet[..8] == packet_out[..8] => {
+                if self.spec.verbose { println!("😁 CHECKSUM MATCH (no payload)"); };
+                Ok(())
+            }
+            // this from the atlas traceroute probes implentation:
+             /* Unfortunately, cheap home routers may
              * forget to restore the checksum field
              * when they are doing NAT. Ignore the
              * sequence number if it seems wrong.
              */
-            &TraceProtocol::UDP if wrapped_ip_packet[..4] == packet_out[..4] => {
-                println!("checksum invalid - ignoring");
-
-                print!(
-                    "packet out {:?}: {:02x}",
-                    &self.spec.proto,
-                    &packet_out.as_hex()
-                );
-                print!(" -> ");
-                println!("icmp payload: {:02x}", &wrapped_ip_packet[..8].as_hex());
-                println!(
-                    "64b of icmp in packet: {:02x}",
-                    &icmp_packet_in[..8].as_hex()
-                );
-
+            &TraceProtocol::UDP if wrapped_ip_packet[9..10] == expected_udp_packet[9..10] || wrapped_ip_packet[9..10] == expected_udp_packet[9..10] => {
+                if self.spec.verbose { println!("😐 PAYLOAD AND SRC PORT MATCH ONLY (no checksum)"); };
                 Ok(())
             },
-            // &TraceProtocol::UDP if icmp_packet_in[28..36] == wrapped_ip_packet[..8] => { 
-            //     println!("icmp packet in: {:02x}", icmp_packet_in[..64].as_hex());    
-            //     Ok(())
-            // },
-
-            // check to see if the source ports on the packet out and the reflected packet
-            // match up
-             &TraceProtocol::UDP if wrapped_ip_packet[2..4] == packet_out[2..4] => { 
-                println!("icmp packet in: {:02x}", icmp_packet_in[..64].as_hex());    
-                Ok(())
-            },
+ 
             // tnis might be a hop from an earlier probe, so then
             // dst_port should be higher than or equal to the udp base port
             // (a constant for now), but lower than UDP_BASE_PORT + this hopnr
-            &TraceProtocol::UDP if NetworkEndian::read_u16(&wrapped_ip_packet[2..4]) >= DST_BASE_PORT && 
+            &TraceProtocol::UDP if self.spec.paris.is_some() && NetworkEndian::read_u16(&wrapped_ip_packet[2..4]) >= DST_BASE_PORT && 
             NetworkEndian::read_u16(&wrapped_ip_packet[2..4]) <= DST_BASE_PORT + 0xff => {
                 println!("wrong hopno! earlier hop");
                 Ok(())
             },
+            // check to see if the source ports on the packet out and the reflected packet
+            // match up. This is for classic sync traceroute only.
+             &TraceProtocol::UDP if wrapped_ip_packet[2..4] == expected_udp_packet[2..4] || wrapped_ip_packet[2..4] == packet_out[2..4] => { 
+                if self.spec.verbose {
+                    println!("😐 SRC PORT MATCH ONLY (no payload, no checksum)");
+                    println!("icmp packet in: {:02x}", icmp_packet_in[..64].as_hex());    
+                    println!("returned packet snip: {:02x}", icmp_packet_in[28..36].as_hex());
+                }
+                Ok(())
+            },
             // see the above comment about cutting off of reflected ip packets
-            &TraceProtocol::TCP if wrapped_ip_snip == &packet_out[..wrapped_ip_snip.len()] => Ok(()),
+            &TraceProtocol::TCP if wrapped_ip_snip == &packet_out[..wrapped_ip_snip.len()] => { println!("returned packet identified"); Ok(()) },
             _ => {
                 print!(
                     "packet out {:?}: {:02x}",
@@ -631,7 +690,7 @@ impl<'a> TraceRoute<'a> {
                 )
             }
             _ => { 
-                    println!("unknown : {:02x}", &ip_payload.as_hex());
+                    if self.spec.verbose { println!("unknown : {:02x}", &ip_payload.as_hex()); };
                     Err(Error::new(ErrorKind::Other, "unidentified packet type - ipv4"))
                 },
         }
@@ -669,7 +728,7 @@ impl<'a> TraceRoute<'a> {
                     return Err(Error::new(ErrorKind::TimedOut, "too many hops"));
                 }
                 let wrapped_ip_packet = Ipv6Packet::new(&icmp_packet_in.payload()).unwrap();
-                //println!("unwrap ip: {:?}", wrapped_ip_packet);
+
                 self.analyse_icmp_packet_in(
                     wrapped_ip_packet.payload(),
                     &icmp_packet_in.packet(),
@@ -677,8 +736,10 @@ impl<'a> TraceRoute<'a> {
                 )
             }
             _ => {
-                println!("unknown : {:?}", icmp_packet_in.get_icmpv6_type());
-                println!("64b of icmp packet in : {:02x}", &icmp_packet_in.payload()[..64].as_hex());
+                if self.spec.verbose {
+                    println!("unknown : {:?}", icmp_packet_in.get_icmpv6_type());
+                    println!("64b of icmp packet in : {:02x}", &icmp_packet_in.payload()[..64].as_hex());
+                };
                 Err(Error::new(ErrorKind::Other, "unidentified packet type - ipv6"))
             }
         }
@@ -703,6 +764,11 @@ impl<'a> TraceRoute<'a> {
     #[allow(unused_variables)]
     fn next_hop(&mut self) -> io::Result<TraceResult> {
         self.seq_num += 1;
+        if self.spec.verbose {
+            println!("==============");
+            println!("START HOP {}", self.seq_num);
+        }
+
         let mut trace_result = TraceResult {
             error: Err(Error::new(ErrorKind::Other, "-42")),
             hop: self.seq_num as u8,
@@ -727,13 +793,10 @@ impl<'a> TraceRoute<'a> {
                 TraceProtocol::UDP => self.make_udp_packet_out(),
                 TraceProtocol::TCP => self.make_tcp_packet_out(),
             };
-            // println!(
-            //     "ttl: {:?}, seq: {:?}, id: {:02x}",
-            //     self.ttl,
-            //     self.seq_num,
-            //     &[self.ident].as_hex()
-            // );
-            println!("identifier: {:02x}",&[self.ident].as_hex());
+            
+            if self.spec.verbose { 
+                println!("identifier: {:02x}",&[self.ident].as_hex());
+            };
 
             let dst_port_for_hop = match self.spec.proto {
                 TraceProtocol::ICMP => self.seq_num + DST_BASE_PORT,
@@ -748,7 +811,7 @@ impl<'a> TraceRoute<'a> {
                 TraceProtocol::TCP => self.spec.tcp_dest_port,
             };
             self.dst_addr.set_port(dst_port_for_hop);
-            println!("dst_addr port: {:02x}", &[self.dst_addr.port()].as_hex());
+            if self.spec.verbose { println!("dst_addr port: {:02x}", &[self.dst_addr.port()].as_hex()); };
             let wrote = socket_out.send_to(&packet_out, &<SockAddr>::from(self.dst_addr))?;
             assert_eq!(wrote, packet_out.len());
             let start_time = SteadyTime::now();
@@ -833,8 +896,10 @@ impl<'a> TraceRoute<'a> {
                                 if err.kind() == ErrorKind::InvalidData
                                     || err.kind() == ErrorKind::Other =>
                             {
-                                println!("*");
-                                println!("{:?}", err);
+                                if self.spec.verbose { 
+                                    println!("Error occurred");
+                                    println!("{:?}", err);
+                                };
                                 hop = HopOrError::HopError(HopTimeOutError {
                                     message: "*".to_string(),
                                     line: 0,
@@ -865,11 +930,14 @@ impl<'a> TraceRoute<'a> {
                                     hop_name: lookup_addr(&host.ip()).unwrap(),
                                     rtt: HopDuration(rtt),
                                 });
+
                                 break 'timeout;
                             }
                             err => {
-                                println!("* wut?");
-                                println!("{:?}", err);
+                                if self.spec.verbose {
+                                    println!("* Error occured");
+                                    println!("{:?}", err);
+                                }
                                 hop = HopOrError::HopError(HopTimeOutError {
                                     message: "* wut?".to_string(),
                                     line: 0,
@@ -996,3 +1064,37 @@ pub fn sync_start_with_timeout<'a, T: ToSocketAddrs>(
 }
 // }
 // }
+fn debug_print_packet_in (packet: &[u8], packet_out: &[u8], expected_udp_packet: &[u8]) {
+
+    println!("-------------------------");
+    println!("outgoing packet");
+    println!("-------------------------");
+    println!("udp packet out: {:02x}", &packet_out.as_hex());
+    println!("expected udp packet: {:02x}", 
+        &expected_udp_packet.as_hex()
+    );
+    println!("-------------------------");
+    println!("incoming packet breakdown");
+    println!("-------------------------");
+    println!("icmp header: {:02x}", &packet[..8].as_hex());
+    println!("icmp body");
+    println!("---------");
+    match &packet[8] {
+        0x45 => { 
+            println!("ip header: {:02x}", &packet[8..28].as_hex());
+            println!("src addr: {:?}", &packet[20..24]);
+            println!("dst addr: {:?}", &packet[24..28]); 
+        },
+        _ => { 
+            println!("ip header: {:02x}", &packet[8..48].as_hex());
+            println!("src addr:  {:02x}", &packet[16..32].as_hex());
+            println!("dst addr: {:02x}", &packet[32..48].as_hex());
+        }
+    };
+    println!("ip payload");
+    println!("----------");
+    println!("udp header: {:02x}", &packet[28..36].as_hex());
+    println!("udp payload: {:02x}", &packet[36..38].as_hex());
+    println!("128 and beyond (mpls labels): {:02x}", &packet[136..148].as_hex());
+    println!("-----------");
+}
