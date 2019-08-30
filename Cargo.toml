@@ -1,6 +1,6 @@
 [package]
 name = "traceroute"
-version = "0.1.0"
+version = "0.2.0"
 description = "Traceroute compliant with RIPE Atlas probes"
 authors = ["Jasper den Hertog <jasper@plainspace.com>"]
 readme = "README.md"
