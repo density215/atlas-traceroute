@@ -475,6 +475,7 @@ impl<'a> TraceRoute<'a> {
         let mut tcp_packet = MutableTcpPacket::owned(tcp_buffer).unwrap();
         let payload = &mut [00u8; 2];
         byteorder::NetworkEndian::write_u16(payload, self.ident);
+        tcp_packet.set_sequence(self.seq_num.into());
         tcp_packet.set_payload(payload);
         // this seems to be a viable minimum (20 bytes of header length; ask wireshark)
         tcp_packet.set_data_offset(5);
@@ -679,14 +680,20 @@ impl<'a> TraceRoute<'a> {
                 }
                 Ok(()) 
             },
+            &TraceProtocol::TCP if wrapped_ip_packet[4..8] == expected_packet[4..8] => {
+                if self.spec.verbose {
+                    println!("😁 SRC PORT AND SEQUENCE NUMBER MATCHED");
+                }
+                Ok(())
+            },
             &TraceProtocol::TCP if wrapped_ip_packet[16..18] == expected_packet[16..18] || wrapped_ip_packet[16..18] == packet_out[16..18] => {
-                if self.spec.verbose { println!("😁 CHECKSUM MATCH (no payload)"); };
+                if self.spec.verbose { println!("😁 SRC PORT AND CHECKSUM MATCH (no sequence number, no payload)"); };
                 Ok(())
             },
             // see the above comment about cutting off of reflected ip packets
             &TraceProtocol::TCP if wrapped_ip_snip == &expected_packet[..wrapped_ip_snip.len()] => {
                 if self.spec.verbose {
-                    println!("😐 SRC AND DST PORT MATCH ONLY (no checksum, no payload)");
+                    println!("😐 SRC AND DST PORT MATCH ONLY (no sequence number, no checksum, no payload)");
                 }
                 Ok(()) },
             _ => {
