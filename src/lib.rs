@@ -315,6 +315,8 @@ impl<'a> TraceRoute<'a> {
         };
 
         socket_out.set_reuse_address(true).unwrap();
+        // disable nagle's algo
+        socket_out.set_nodelay(true);
 
         //println!("{:?}", self.src_addr);
         //socket_out.bind(&self.src_addr).unwrap();

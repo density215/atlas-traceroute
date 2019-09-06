@@ -17,7 +17,7 @@ implemented features right now:
 - ICMP/UDP/TCP type
 - dual-stack IPv4/6
 - hostname lookups
-- classic traceroute (paris traceroute also for UDP)
+- classic and paris traceroute for all combinations of protocols and IP versions
 - interface auto-detection
 
 everything untested. everything still runs synchronised.
