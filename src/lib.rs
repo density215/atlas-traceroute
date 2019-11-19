@@ -318,6 +318,14 @@ impl<'a> TraceRoute<'a> {
         // disable nagle's algo
         socket_out.set_nodelay(true);
 
+        // binding the src_addr makes sure no temporary
+        // ipv6 addresses are created to send the packet.
+        // Temporary ipv6 addresses (a privacy feature) will
+        // result in wrong UDP/TCP checksums, since that
+        // will use the secured IPv6 address of the interface
+        // sending as the src_addr to calculate checksums with.
+        socket_out.bind(&self.src_addr).unwrap();
+
         //println!("{:?}", self.src_addr);
         //socket_out.bind(&self.src_addr).unwrap();
         //let dst_addr = <SockAddr>::from(self.dst_addr);
