@@ -55,6 +55,10 @@ use std::num::ParseIntError;
 //usage:     "\n       -O <file>               Name of output file"
 //usage:     "\n       -S <size>               Size of packet"
 
+// TODO: ALL println! need to be replaced by io::stdout with
+// proper error handling (no .unwrap()), because the rust
+// wlll panic if stdout goes away and we're writing to stdout.
+// And this is way more common than you'd think ( | head does this!)
 const DEFAULT_TRACE_PROTOCOL: traceroute::TraceProtocol = traceroute::TraceProtocol::ICMP;
 const DEFAULT_TCP_DEST_PORT: u16 = 0x5000; // port 0x50 (80) is the actual UI default in Atlas.
 const DEFAULT_PACKETS_PER_HOP: u8 = 3;
