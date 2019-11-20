@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use structopt::StructOpt;
 
-use traceroute::libtraceroute::route::*;
+use traceroute::libtraceroute::route::{AddressFamily, TraceProtocol, TraceRouteSpec};
 use traceroute::libtraceroute::start::sync_start_with_timeout;
 
 // use trac::d::*;
