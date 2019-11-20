@@ -12,21 +12,17 @@ use std::str::FromStr;
 
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use std::io::{self, Error, ErrorKind};
-use std::net::{IpAddr, SocketAddrV4};
-use std::net::{SocketAddr, SocketAddrV6};
+use std::net::{IpAddr, SocketAddr};
 
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
 
-use pnet::datalink::NetworkInterface;
-use pnet::packet::icmp::checksum;
 use pnet::packet::icmp::destination_unreachable::DestinationUnreachablePacket;
 use pnet::packet::icmp::echo_reply::EchoReplyPacket;
 use pnet::packet::icmp::echo_request::MutableEchoRequestPacket;
 use pnet::packet::icmp::time_exceeded::TimeExceededPacket;
-use pnet::packet::icmp::{IcmpPacket, IcmpTypes};
-use pnet::packet::icmpv6::MutableIcmpv6Packet;
-use pnet::packet::icmpv6::{Icmpv6Packet, Icmpv6Types};
+use pnet::packet::icmp::{checksum, IcmpPacket, IcmpTypes};
+use pnet::packet::icmpv6::{Icmpv6Packet, Icmpv6Types, MutableIcmpv6Packet};
 use pnet::packet::ipv4::Ipv4Packet;
 use pnet::packet::ipv6::Ipv6Packet;
 use pnet::packet::tcp::ipv4_checksum as tcp_ipv4_checksum;
@@ -42,6 +38,9 @@ use dns_lookup::lookup_addr;
 use byteorder::{ByteOrder, NetworkEndian};
 use hex_slice::AsHex;
 
+use super::debug::debug_print_packet_in;
+use super::start::{TraceProtocol, TraceRouteSpec};
+
 pub const MAX_PACKET_SIZE: usize = 4096 + 128;
 pub const ICMP_HEADER_LEN: usize = 8;
 pub const UDP_HEADER_LEN: usize = 8;
@@ -49,47 +48,25 @@ pub const TCP_HEADER_LEN: usize = 40;
 pub const SRC_BASE_PORT: u16 = 0x5000;
 pub const DST_BASE_PORT: u16 = 0x8000 + 666;
 
-#[derive(Debug, Clone, Copy)]
-pub enum AddressFamily {
-    V4,
-    V6,
-}
-
 enum IcmpPacketIn {
     V4(Ipv4Packet<'static>),
     V6(Icmpv6Packet<'static>),
 }
 
-pub fn make_icmp6_packet(payload: &[u8]) -> Icmpv6Packet {
+fn make_icmp6_packet(payload: &[u8]) -> Icmpv6Packet {
     Icmpv6Packet::new(&payload).unwrap()
 }
 
 #[derive(Debug)]
-pub struct TraceRouteSpec {
-    pub proto: TraceProtocol,
-    pub af: Option<AddressFamily>, // might be empty, but could then be inferred from the dst_addr (if it's an IP address)
-    pub start_ttl: u16,
-    pub max_hops: u16,
-    pub paris: Option<u8>,
-    pub packets_per_hop: u8,
-    pub tcp_dest_port: u16,
-    pub timeout: i64,
-    pub uuid: String,
-    // this implementation specific options
-    pub public_ip: Option<String>,
-    pub verbose: bool,
-}
-
-#[derive(Debug)]
-pub struct TraceRoute<'a> {
+pub struct TraceHopsIterator<'a> {
     pub dst_addr: SocketAddr,
     // af is based on either the user option, or from the
     // destination address if it was an IP address.
-    pub af: AddressFamily,
+    // pub af: AddressFamily,
     // inferred from user options
     pub spec: &'a TraceRouteSpec,
     // invariants for this tr
-    pub src_addr: SockAddr,
+    pub src_addr: SocketAddr,
     pub socket_in: Socket,
     // mutable state
     pub ttl: u16,
@@ -106,7 +83,7 @@ pub struct HopTimeOutError {
     pub column: usize,
 }
 
-pub type ResultVec = Vec<HopOrError>;
+type ResultVec = Vec<HopOrError>;
 
 #[derive(Debug)]
 pub enum HopOrError {
@@ -150,13 +127,6 @@ pub struct TraceResult {
     pub error: io::Result<Error>,
     pub hop: u8,
     pub result: Vec<HopOrError>,
-}
-
-#[derive(Debug)]
-pub enum TraceProtocol {
-    ICMP,
-    UDP,
-    TCP,
 }
 
 // To satisfy the coherency rules
@@ -208,27 +178,6 @@ impl fmt::Debug for HopDuration {
     }
 }
 
-pub fn get_sock_addr<'a>(af: &AddressFamily, port: u16) -> SockAddr {
-    let interfaces = pnet::datalink::interfaces();
-    let interface = interfaces
-        .into_iter()
-        .filter(|iface: &NetworkInterface| iface.ips.len() > 0)
-        .flat_map(|i| i.ips)
-        // select the appropriate interface for the requested address family.
-        .filter(|addr| match af {
-            &AddressFamily::V4 => addr.is_ipv4() && !addr.ip().is_loopback(),
-            &AddressFamily::V6 => addr.is_ipv6() && addr.ip().is_global(),
-        })
-        .map(|a| a.ip())
-        .nth(0)
-        .unwrap();
-
-    match interface {
-        IpAddr::V4(addrv4) => <SockAddr>::from(SocketAddrV4::new(addrv4, port)),
-        IpAddr::V6(addrv6) => <SockAddr>::from(SocketAddrV6::new(addrv6, port, 0, 0x0)),
-    }
-}
-
 enum PacketType<'a> {
     UDP(UdpPacket<'a>),
     TCP(TcpPacket<'a>),
@@ -273,18 +222,18 @@ impl<'a> PacketType<'a> {
     }
 }
 
-impl<'a> TraceRoute<'a> {
+impl<'a> TraceHopsIterator<'a> {
     // TODO: refactor to be only used for OUTGOING socket.
     fn create_socket(&self, out: bool) -> Socket {
-        let af = &self.af;
+        let af = &self.src_addr;
         let protocol = match (out, &self.spec.proto) {
             (false, _) => match af {
-                &AddressFamily::V4 => Some(<Protocol>::icmpv4()),
-                &AddressFamily::V6 => Some(<Protocol>::icmpv6()),
+                &SocketAddr::V4(_) => Some(<Protocol>::icmpv4()),
+                &SocketAddr::V6(_) => Some(<Protocol>::icmpv6()),
             },
             (true, &TraceProtocol::ICMP) => match af {
-                &AddressFamily::V4 => Some(<Protocol>::icmpv4()),
-                &AddressFamily::V6 => Some(<Protocol>::icmpv6()),
+                &SocketAddr::V4(_) => Some(<Protocol>::icmpv4()),
+                &SocketAddr::V6(_) => Some(<Protocol>::icmpv6()),
             },
             (true, &TraceProtocol::UDP) => Some(<Protocol>::udp()),
             (true, &TraceProtocol::TCP) => Some(<Protocol>::tcp()),
@@ -297,9 +246,9 @@ impl<'a> TraceRoute<'a> {
             (true, &TraceProtocol::TCP) => Type::raw(),
         };
 
-        let socket_out = match af {
-            &AddressFamily::V4 => Socket::new(Domain::ipv4(), sock_type, protocol).unwrap(),
-            &AddressFamily::V6 => Socket::new(Domain::ipv6(), sock_type, protocol).unwrap(),
+        let socket_out = match &self.src_addr {
+            SocketAddr::V4(ip) => Socket::new(Domain::ipv4(), sock_type, protocol).unwrap(),
+            SocketAddr::V6(ip) => Socket::new(Domain::ipv6(), sock_type, protocol).unwrap(),
         };
 
         socket_out.set_reuse_address(true).unwrap();
@@ -312,7 +261,7 @@ impl<'a> TraceRoute<'a> {
         // result in wrong UDP/TCP checksums, since that
         // will use the secured IPv6 address of the interface
         // sending as the src_addr to calculate checksums with.
-        socket_out.bind(&self.src_addr).unwrap();
+        socket_out.bind(&SockAddr::from(self.src_addr)).unwrap();
 
         //println!("{:?}", self.src_addr);
         //socket_out.bind(&self.src_addr).unwrap();
@@ -328,8 +277,8 @@ impl<'a> TraceRoute<'a> {
     }
 
     fn make_icmp_packet_out(&self) -> Vec<u8> {
-        match self.af {
-            AddressFamily::V4 => {
+        match &self.src_addr {
+            &SocketAddr::V4(_) => {
                 let icmp_buffer = vec![00u8; ICMP_HEADER_LEN];
                 let mut echo_request_packet = MutableEchoRequestPacket::owned(icmp_buffer).unwrap();
                 echo_request_packet.set_icmp_type(IcmpTypes::EchoRequest);
@@ -341,7 +290,7 @@ impl<'a> TraceRoute<'a> {
                 echo_request_packet.set_checksum(p_checksum);
                 echo_request_packet.packet().to_owned()
             }
-            AddressFamily::V6 => {
+            &SocketAddr::V6(_) => {
                 let icmp_buffer = vec![00u8; ICMP_HEADER_LEN];
                 let mut echo_request_packet = MutableIcmpv6Packet::owned(icmp_buffer).unwrap();
                 echo_request_packet.set_icmpv6_type(Icmpv6Types::EchoRequest);
@@ -359,11 +308,10 @@ impl<'a> TraceRoute<'a> {
         let src_ip_enum: IpAddr;
         let dst_ip_enum: IpAddr;
 
-        match self.af {
-            AddressFamily::V4 => {
+        match &self.src_addr {
+            SocketAddr::V4(ip) => {
                 src_ip_enum = IpAddr::V4(
-                    *self
-                        .src_addr
+                    *<SockAddr>::from(self.src_addr)
                         .as_inet()
                         .expect("invalid source address")
                         .ip(),
@@ -375,10 +323,9 @@ impl<'a> TraceRoute<'a> {
                         .ip(),
                 )
             }
-            AddressFamily::V6 => {
+            SocketAddr::V6(ip) => {
                 src_ip_enum = IpAddr::V6(
-                    *self
-                        .src_addr
+                    *<SockAddr>::from(self.src_addr)
                         .as_inet6()
                         .expect("invalid source address")
                         .ip(),
@@ -448,11 +395,10 @@ impl<'a> TraceRoute<'a> {
         let src_ip_enum: IpAddr;
         let dst_ip_enum: IpAddr;
 
-        match self.af {
-            AddressFamily::V4 => {
+        match &self.src_addr {
+            SocketAddr::V4(ip) => {
                 src_ip_enum = IpAddr::V4(
-                    *self
-                        .src_addr
+                    *<SockAddr>::from(self.src_addr)
                         .as_inet()
                         .expect("invalid source address")
                         .ip(),
@@ -465,10 +411,9 @@ impl<'a> TraceRoute<'a> {
                 );
                 tcp_buffer = vec![00u8; 40];
             }
-            AddressFamily::V6 => {
+            SocketAddr::V6(ip) => {
                 src_ip_enum = IpAddr::V6(
-                    *self
-                        .src_addr
+                    *<SockAddr>::from(self.src_addr)
                         .as_inet6()
                         .expect("invalid source address")
                         .ip(),
@@ -540,15 +485,15 @@ impl<'a> TraceRoute<'a> {
         };
 
         let ttl_in: u8;
-        match self.af {
-            AddressFamily::V4 => {
+        match &self.src_addr {
+            SocketAddr::V4(ip) => {
                 let pack = Ipv4Packet::owned(buf_in.to_owned()).unwrap();
                 ttl_in = pack.get_ttl();
                 (IcmpPacketIn::V4(pack), ttl_in)
             }
             // IPv6 holds IP header of incoming packet in ancillary data, so
             // we unpack the ICMPv6 packet directly here.
-            AddressFamily::V6 => {
+            SocketAddr::V6(ip) => {
                 let icmp_pack = Icmpv6Packet::owned(buf_in.to_owned()).unwrap();
                 let ip_pack = Ipv6Packet::owned(buf_in.to_owned()).unwrap();
                 (IcmpPacketIn::V6(icmp_pack), ip_pack.get_hop_limit())
@@ -648,7 +593,12 @@ impl<'a> TraceRoute<'a> {
         };
 
         if self.spec.verbose {
-            self.debug_print_packet_in(&icmp_packet_in, &packet_out, &expected_packet);
+            debug_print_packet_in(
+                &self.spec.proto,
+                &icmp_packet_in,
+                &packet_out,
+                &expected_packet,
+            );
         };
 
         match &self.spec.proto {
@@ -908,13 +858,13 @@ impl<'a> TraceRoute<'a> {
     fn set_ttl(&self, socket: &Socket) -> Result<u32, Error> {
         // In IPv6 IP_TTL is NOT called IPV6_TTL, but
         // IPV6_UNICAST_HOPS
-        match self.af {
-            AddressFamily::V4 => {
+        match &self.src_addr {
+            SocketAddr::V4(ip) => {
                 //println!("socket ttl: {:?}", self.ttl);
                 socket.set_ttl(self.ttl as u32)?;
                 socket.ttl()
             }
-            AddressFamily::V6 => {
+            SocketAddr::V6(ip) => {
                 socket.set_unicast_hops_v6(self.ttl as u32)?;
                 socket.unicast_hops_v6()
             }
@@ -940,7 +890,11 @@ impl<'a> TraceRoute<'a> {
             Vec::with_capacity(self.spec.packets_per_hop as usize);
         let socket_out = self.create_socket(true);
         socket_out.set_reuse_address(true)?;
-        let src = get_sock_addr(&self.af, self.ident);
+        // let af = match &self.src_addr {
+        //     &SocketAddr::V4(ip) => AddressFamily::V4,
+        //     &SocketAddr::V6(ip) => AddressFamily::V6,
+        // };
+        let src = SocketAddr::new(self.src_addr.ip(), self.ident);
 
         //socket_out.bind(&src).unwrap();
         // socket_out.set_nonblocking(true).unwrap();
@@ -1127,74 +1081,9 @@ impl<'a> TraceRoute<'a> {
         trace_result.result = trace_hops;
         Ok(trace_result)
     }
-
-    fn debug_print_packet_in(&self, packet: &[u8], packet_out: &[u8], expected_udp_packet: &[u8]) {
-        println!("-------------------------");
-        println!("outgoing packet");
-        println!("-------------------------");
-        match &self.spec.proto {
-            TraceProtocol::UDP => {
-                println!("udp packet out: {:02x}", &packet_out.as_hex());
-                println!("expected udp packet: {:02x}", &expected_udp_packet.as_hex());
-            }
-            TraceProtocol::TCP => {
-                println!("tcp packet header out: {:02x}", &packet_out[..20].as_hex());
-                println!("tcp payload out: {:02x}", &packet_out[20..].as_hex());
-                println!(
-                    "expected tcp header: {:02x}",
-                    &expected_udp_packet[..20].as_hex()
-                );
-                println!(
-                    "expected tcp payload: {:02x}",
-                    &expected_udp_packet[20..].as_hex()
-                );
-            }
-            _ => {
-                println!("not implemented");
-            }
-        }
-        println!("-------------------------");
-        println!("incoming packet breakdown");
-        println!("-------------------------");
-        println!("icmp header: {:02x}", &packet[..8].as_hex());
-        println!("icmp body");
-        println!("---------");
-        match &packet[8] {
-            0x45 => {
-                println!("ip header: {:02x}", &packet[8..28].as_hex());
-                println!("src addr: {:?}", &packet[20..24]);
-                println!("dst addr: {:?}", &packet[24..28]);
-            }
-            _ => {
-                println!("ip header: {:02x}", &packet[8..48].as_hex());
-                println!("src addr:  {:02x}", &packet[16..32].as_hex());
-                println!("dst addr: {:02x}", &packet[32..48].as_hex());
-            }
-        };
-        println!("ip payload");
-        println!("----------");
-        match &self.spec.proto {
-            TraceProtocol::UDP => {
-                println!("udp header: {:02x}", &packet[28..36].as_hex());
-                println!("udp payload: {:02x}", &packet[36..38].as_hex());
-            }
-            TraceProtocol::TCP => {
-                println!("tcp header: {:02x}", &packet[28..48].as_hex());
-                println!("tcp payload: {:02x}", &packet[48..64].as_hex());
-            }
-            _ => {
-                println!("not implemented");
-            }
-        }
-        println!(
-            "128 and beyond (mpls labels): {:02x}",
-            &packet[136..148].as_hex()
-        );
-        println!("-----------");
-    }
 }
 
-impl<'a> Iterator for TraceRoute<'a> {
+impl<'a> Iterator for TraceHopsIterator<'a> {
     type Item = io::Result<TraceResult>;
 
     fn next(&mut self) -> Option<io::Result<TraceResult>> {

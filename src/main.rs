@@ -1,17 +1,18 @@
 #[macro_use]
 use structopt;
 
-use serde;
+// use serde;
 use serde_json;
 
-use std::env;
+// use std::env;
 use std::num::ParseIntError;
 use std::path::PathBuf;
-use std::str::FromStr;
+// use std::str::FromStr;
 use structopt::StructOpt;
 
-use traceroute::libtraceroute::route::{AddressFamily, TraceProtocol, TraceRouteSpec};
-use traceroute::libtraceroute::start::sync_start_with_timeout;
+use traceroute::libtraceroute::start::{
+    sync_start_with_timeout, AddressFamily, TraceProtocol, TraceRouteSpec,
+};
 
 // use trac::d::*;
 

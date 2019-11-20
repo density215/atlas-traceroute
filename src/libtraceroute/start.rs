@@ -1,16 +1,93 @@
-use crate::libtraceroute::route::*;
+use pnet::datalink::NetworkInterface;
+
+use crate::libtraceroute::iterators::{TraceHopsIterator, DST_BASE_PORT, SRC_BASE_PORT};
 use socket2::*;
 use std::io::{self, Error, ErrorKind};
 use std::net::{SocketAddr, ToSocketAddrs};
 use time::Duration;
 
+#[derive(Debug)]
+pub struct TraceRoute<'a> {
+    pub spec: &'a TraceRouteSpec,
+    pub start_src_addr: &'a SockAddr,
+    pub start_dst_addr: &'a SocketAddr,
+    pub trace_hops: TraceHopsIterator<'a>,
+}
+
+impl<'a> TraceRoute<'a> {
+    pub fn new(
+        spec: &TraceRouteSpec,
+        start_src_addr: SocketAddr,
+        start_dst_addr: SocketAddr,
+        socket_in: Socket,
+    ) -> TraceHopsIterator {
+        TraceHopsIterator {
+            spec: spec,
+            src_addr: start_src_addr,
+            dst_addr: start_dst_addr,
+            ttl: spec.start_ttl,
+            ident: rand::random(),
+            seq_num: spec.start_ttl,
+            done: false,
+            result: Vec::new(),
+            socket_in: socket_in,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct TraceRouteSpec {
+    pub proto: TraceProtocol,
+    pub af: Option<AddressFamily>, // might be empty, but could then be inferred from the dst_addr (if it's an IP address)
+    pub start_ttl: u16,
+    pub max_hops: u16,
+    pub paris: Option<u8>,
+    pub packets_per_hop: u8,
+    pub tcp_dest_port: u16,
+    pub timeout: i64,
+    pub uuid: String,
+    // this implementation specific options
+    pub public_ip: Option<String>,
+    pub verbose: bool,
+}
+
+#[derive(Debug)]
+pub enum TraceProtocol {
+    ICMP,
+    UDP,
+    TCP,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum AddressFamily {
+    V4,
+    V6,
+}
+
+pub fn get_sock_addr<'a>(af: &AddressFamily, port: u16) -> SocketAddr {
+    let interfaces = pnet::datalink::interfaces();
+    let interface = interfaces
+        .into_iter()
+        .filter(|iface: &NetworkInterface| iface.ips.len() > 0)
+        .flat_map(|i| i.ips)
+        // select the appropriate interface for the requested address family.
+        .filter(|addr| match af {
+            &AddressFamily::V4 => addr.is_ipv4() && !addr.ip().is_loopback(),
+            &AddressFamily::V6 => addr.is_ipv6() && addr.ip().is_global(),
+        })
+        .map(|a| a.ip())
+        .nth(0)
+        .unwrap();
+
+    SocketAddr::new(interface, 0)
+}
+
 /// Run-of-the-mill icmp ipv4/ipv6 traceroute implementation (for now)
 // Completely synchronous. Every packet that's send will trigger a wait for its return
 pub fn sync_start_with_timeout<'a, T: ToSocketAddrs>(
     address: T,
-    spec: &'a TraceRouteSpec, // address: T,
-                              // timeout: Duration
-) -> io::Result<TraceRoute<'a>> {
+    spec: &'a TraceRouteSpec,
+) -> io::Result<TraceHopsIterator<'a>> {
     match Duration::seconds(spec.timeout).num_microseconds() {
         None => return Err(Error::new(ErrorKind::InvalidInput, "Timeout too large")),
         Some(0) => return Err(Error::new(ErrorKind::InvalidInput, "Timeout too small")),
@@ -73,18 +150,5 @@ pub fn sync_start_with_timeout<'a, T: ToSocketAddrs>(
     println!("dst_addr: {:?}", dst_addr);
     println!("timestamp: {:?}", time::get_time().sec);
 
-    Ok({
-        TraceRoute {
-            src_addr: src_addr,
-            dst_addr: dst_addr,
-            af: af,
-            spec: spec,
-            ttl: spec.start_ttl,
-            ident: rand::random(),
-            seq_num: spec.start_ttl,
-            done: false,
-            result: Vec::new(),
-            socket_in: socket_in,
-        }
-    })
+    Ok(TraceRoute::new(spec, src_addr, dst_addr, socket_in))
 }
