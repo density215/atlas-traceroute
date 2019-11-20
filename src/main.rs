@@ -1,14 +1,19 @@
 #[macro_use]
-extern crate structopt;
-extern crate serde;
-extern crate serde_json;
-extern crate traceroute;
+use structopt;
+
+use serde;
+use serde_json;
 
 use std::env;
-use std::path::PathBuf;
-use structopt::StructOpt;
-use std::str::FromStr;
 use std::num::ParseIntError;
+use std::path::PathBuf;
+use std::str::FromStr;
+use structopt::StructOpt;
+
+use traceroute::libtraceroute::route::*;
+use traceroute::libtraceroute::start::sync_start_with_timeout;
+
+// use trac::d::*;
 
 // „I prefer zeroes on the loose
 // to those lined up behind a cipher.‟
@@ -59,7 +64,7 @@ use std::num::ParseIntError;
 // proper error handling (no .unwrap()), because the rust
 // wlll panic if stdout goes away and we're writing to stdout.
 // And this is way more common than you'd think ( | head does this!)
-const DEFAULT_TRACE_PROTOCOL: traceroute::TraceProtocol = traceroute::TraceProtocol::ICMP;
+const DEFAULT_TRACE_PROTOCOL: TraceProtocol = TraceProtocol::ICMP;
 const DEFAULT_TCP_DEST_PORT: u16 = 0x5000; // port 0x50 (80) is the actual UI default in Atlas.
 const DEFAULT_PACKETS_PER_HOP: u8 = 3;
 const DEFAULT_PACKET_IN_TIMEOUT: i64 = 1;
@@ -67,10 +72,10 @@ const DEFAULT_PARIS_ID: u8 = 0x0F;
 const DEFAULT_START_TTL: u16 = 0; // yeah,yeah, wasting a byte here, but we're going to sum this with DST_BASE_PORT
 const DEFAULT_MAX_HOPS: u16 = 255; // max hops to hopperdehop
 
-fn parse_af(af: &str) -> Result<traceroute::AddressFamily, &str> {
+fn parse_af(af: &str) -> Result<AddressFamily, &str> {
     match af.parse::<u8>() {
-        Ok(4) => Ok(traceroute::AddressFamily::V4),
-        Ok(6) => Ok(traceroute::AddressFamily::V6),
+        Ok(4) => Ok(AddressFamily::V4),
+        Ok(6) => Ok(AddressFamily::V6),
         _ => Err("Invalid address family"),
     }
 }
@@ -83,12 +88,12 @@ fn parse_af(af: &str) -> Result<traceroute::AddressFamily, &str> {
 struct TraceRouteOpt {
     /// Use IPv4 (default)
     // #[structopt(short = "4", parse(try_from_str = "parse_af"))]
-    // v4: Option<traceroute::AddressFamily>, // af: AddressFamily ,src_addr: SockAddr,
+    // v4: Option<AddressFamily>, // af: AddressFamily ,src_addr: SockAddr,
     #[structopt(short = "4")]
     v4: bool,
     /// Use IPv6
     // #[structopt(short = "6", parse(try_from_str = "parse_af"))]
-    // v6: Option<traceroute::AddressFamily>, // af: AddressFamily,
+    // v6: Option<AddressFamily>, // af: AddressFamily,
     #[structopt(short = "6")]
     v6: bool,
     // Don't fragment
@@ -105,7 +110,7 @@ struct TraceRouteOpt {
     #[structopt(short = "T")]
     proto_tcp: bool, // proto: TraceProtocol::TCP,
     /// Enable Paris traceroute, with optional paris id
-    #[structopt(short = "a", long = "paris", name = "enable paris traceroute" )]
+    #[structopt(short = "a", long = "paris", name = "enable paris traceroute")]
     paris: Option<Option<u8>>, // DEFAULT_PARIS_ID
     /// packets per hop
     #[structopt(short = "c", long = "trt_count", name = "packets per hop")]
@@ -143,10 +148,10 @@ struct TraceRouteOpt {
     dst_addr: String, //to SocketAddr,
     /// Public IP address of the interface used (in case of NAT) to use in checksum calculation
     #[structopt(short = "i", long = "publicip", name = "public ip address")]
-       // -- this traceroute implementation specific options (not in atlas probes) --
+    // -- this traceroute implementation specific options (not in atlas probes) --
     public_ip: Option<String>,
     #[structopt(short = "v", long = "verbose", name = "print packets breakdown")]
-    verbose: bool
+    verbose: bool,
 }
 
 fn main() {
@@ -157,23 +162,22 @@ fn main() {
     let ip: String = opt.dst_addr + ":0";
     let addr: &str = &ip;
 
-    let af: Result<Option<traceroute::AddressFamily>, &str> = match (opt.v4, opt.v6) {
-        (true, false) => Ok(Some(traceroute::AddressFamily::V4)),
-        (false, true) => Ok(Some(traceroute::AddressFamily::V6)),
+    let af: Result<Option<AddressFamily>, &str> = match (opt.v4, opt.v6) {
+        (true, false) => Ok(Some(AddressFamily::V4)),
+        (false, true) => Ok(Some(AddressFamily::V6)),
         (false, false) => Ok(None),
         _ => Err("cannot specify both address families"),
     };
 
-    let proto: Result<traceroute::TraceProtocol, &str> =
-        match (opt.proto_icmp, opt.proto_udp, opt.proto_tcp) {
-            (true, false, false) => Ok(traceroute::TraceProtocol::ICMP),
-            (false, true, false) => Ok(traceroute::TraceProtocol::UDP),
-            (false, false, true) => Ok(traceroute::TraceProtocol::TCP),
-            (false, false, false) => Ok(DEFAULT_TRACE_PROTOCOL),
-            _ => Err("cannot specify more than one protocol")
-        };
+    let proto: Result<TraceProtocol, &str> = match (opt.proto_icmp, opt.proto_udp, opt.proto_tcp) {
+        (true, false, false) => Ok(TraceProtocol::ICMP),
+        (false, true, false) => Ok(TraceProtocol::UDP),
+        (false, false, true) => Ok(TraceProtocol::TCP),
+        (false, false, false) => Ok(DEFAULT_TRACE_PROTOCOL),
+        _ => Err("cannot specify more than one protocol"),
+    };
 
-    let spec = traceroute::TraceRouteSpec {
+    let spec = TraceRouteSpec {
         proto: proto.unwrap(),
         af: af.unwrap(),
         start_ttl: match opt.start_ttl {
@@ -190,7 +194,7 @@ fn main() {
         },
         paris: match opt.paris {
             Some(paris_id) => Some(paris_id.unwrap_or(DEFAULT_PARIS_ID)),
-            None => None
+            None => None,
         },
         tcp_dest_port: match opt.tcp_dest_port {
             Some(p) => p,
@@ -202,38 +206,37 @@ fn main() {
         },
         uuid: "ATLAS-TRACE-EX".to_string(),
         public_ip: opt.public_ip,
-        verbose: opt.verbose
+        verbose: opt.verbose,
     };
     // println!("dst_name: {}", env::args().nth(1).unwrap());
 
     // TODO: no improvement at all,
     // in fact swallows the error message while still panicing.
-    match traceroute::sync_start_with_timeout(addr, &spec) {
+    match sync_start_with_timeout(addr, &spec) {
         Ok(t) => {
             for result in t {
                 match &result {
                     Err(e) => {
                         println!("{:?}", e);
                     }
-                    Ok(r) => { 
+                    Ok(r) => {
                         println!("{}", serde_json::to_string_pretty(r).unwrap());
-                        if spec.verbose { 
+                        if spec.verbose {
                             println!("END HOP {}", r.hop);
                             println!("==============");
                             println!("");
                         };
-                    },
+                    }
                 }
                 // println!("{}", serde_json::to_string_pretty(&result).unwrap());
             }
         }
         Err(err) => {
-
             println!("{}", err);
         }
     };
 
-    // for result in traceroute::start(addr).unwrap() {
+    // for result in start(addr).unwrap() {
     //     println!("{}", serde_json::to_string_pretty(&result).unwrap());
 
     //     println!("{:?}", result_ip.hop);
