@@ -1,3 +1,3 @@
 mod debug;
-pub mod iterators;
+mod iterators;
 pub mod start;

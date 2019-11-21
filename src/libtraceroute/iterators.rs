@@ -68,6 +68,7 @@ pub struct TraceHopsIterator<'a> {
     // invariants for this tr
     pub src_addr: SocketAddr,
     pub socket_in: Socket,
+    pub socket_out: Socket,
     // mutable state
     pub ttl: u16,
     pub ident: u16,
@@ -250,7 +251,6 @@ impl<'a> TraceHopsIterator<'a> {
             SocketAddr::V4(ip) => Socket::new(Domain::ipv4(), sock_type, protocol).unwrap(),
             SocketAddr::V6(ip) => Socket::new(Domain::ipv6(), sock_type, protocol).unwrap(),
         };
-
         socket_out.set_reuse_address(true).unwrap();
         // disable nagle's algo
         socket_out.set_nodelay(true);
@@ -888,8 +888,12 @@ impl<'a> TraceHopsIterator<'a> {
         self.ttl += 1;
         let mut trace_hops: Vec<HopOrError> =
             Vec::with_capacity(self.spec.packets_per_hop as usize);
-        let socket_out = self.create_socket(true);
-        socket_out.set_reuse_address(true)?;
+
+        self.socket_out
+            .bind(&SockAddr::from(self.src_addr))
+            .unwrap();
+        // let socket_out = self.create_socket(true);
+        self.socket_out.set_reuse_address(true)?;
         // let af = match &self.src_addr {
         //     &SocketAddr::V4(ip) => AddressFamily::V4,
         //     &SocketAddr::V6(ip) => AddressFamily::V6,
@@ -900,7 +904,7 @@ impl<'a> TraceHopsIterator<'a> {
         // socket_out.set_nonblocking(true).unwrap();
 
         'trt: for count in 0..self.spec.packets_per_hop {
-            let ttl = self.set_ttl(&socket_out);
+            let ttl = self.set_ttl(&self.socket_out);
             self.ident = SRC_BASE_PORT - <u16>::from(rand::random::<u8>());
             let packet_out = match self.spec.proto {
                 TraceProtocol::ICMP => self.make_icmp_packet_out(),
@@ -936,9 +940,11 @@ impl<'a> TraceHopsIterator<'a> {
                     &[self.dst_addr.port()],
                     &[self.dst_addr.port()].as_hex()
                 );
-                println!("local addr: {:?}", socket_out.local_addr());
+                println!("local addr: {:?}", self.socket_out.local_addr());
             };
-            let wrote = socket_out.send_to(&packet_out, &<SockAddr>::from(self.dst_addr))?;
+            let wrote = self
+                .socket_out
+                .send_to(&packet_out, &<SockAddr>::from(self.dst_addr))?;
             assert_eq!(wrote, packet_out.len());
             let start_time = SteadyTime::now();
 
