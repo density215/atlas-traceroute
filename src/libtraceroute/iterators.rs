@@ -256,7 +256,6 @@ impl<'a> TraceHopsIterator<'a> {
             // So for each hop the dst_port is increased with one,
             // so we can differentiate between them. easy.
             None => {
-                println!("classic traceroute");
                 udp_packet.set_destination(self.seq_num + DST_BASE_PORT);
             }
             // paris traceroute
