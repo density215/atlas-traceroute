@@ -5,7 +5,6 @@ use structopt;
 use serde_json;
 
 // use std::env;
-use std::num::ParseIntError;
 use std::path::PathBuf;
 // use std::str::FromStr;
 use structopt::StructOpt;
@@ -72,14 +71,6 @@ const DEFAULT_PACKET_IN_TIMEOUT: i64 = 1;
 const DEFAULT_PARIS_ID: u8 = 0x0F;
 const DEFAULT_START_TTL: u16 = 0; // yeah,yeah, wasting a byte here, but we're going to sum this with DST_BASE_PORT
 const DEFAULT_MAX_HOPS: u16 = 255; // max hops to hopperdehop
-
-fn parse_af(af: &str) -> Result<AddressFamily, &str> {
-    match af.parse::<u8>() {
-        Ok(4) => Ok(AddressFamily::V4),
-        Ok(6) => Ok(AddressFamily::V6),
-        _ => Err("Invalid address family"),
-    }
-}
 
 #[derive(Debug, StructOpt)]
 #[structopt(
@@ -238,35 +229,3 @@ fn main() {
             println!("{}", err);
         }
     };
-
-    // for result in start(addr).unwrap() {
-    //     println!("{}", serde_json::to_string_pretty(&result).unwrap());
-
-    //     println!("{:?}", result_ip.hop);
-    //     for hop in result_ip.result {
-    //         //let hop = result_ip; // .unwrap();
-    //         match hop {
-    //             // Ok(hop) => println!(
-    //             //     "{} {} ({}) {}B {:?}",
-    //             //     hop.ttl,
-    //             //     hop.hop_name,
-    //             //     hop.host.ip(),
-    //             //     hop.size,
-    //             //     hop.rtt
-    //             // ),
-    //             Ok(hop) => println!("{:?}", serde_json::to_string(&hop).unwrap()),
-    //             Err(err) => println!("{:?}", serde_json::to_string(&err).unwrap()),
-    //         }
-}
-// println!("--")
-//     // println!(
-//     //     "{} {} ({}) {}B {}ms",
-//     //     hop.ttl,
-//     //     hop.hop_name,
-//     //     hop.host.ip(),
-//     //     hop.size,
-//     //     hop.rtt.num_microseconds().unwrap() as f64 / 1000.0
-//     // );
-//     //println!("{:?}", hop);
-//     // }
-// }
