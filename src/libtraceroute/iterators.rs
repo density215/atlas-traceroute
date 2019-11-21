@@ -275,7 +275,7 @@ impl<'a> TraceHopsIterator<'a> {
             // the payload needs to increased to offset to the desired the checksum.
             // This is actually pretty easy, because if the pauyload is increased by 0x01,
             // the checksum goes down by 0x01...
-            Some(paris_id) => {
+            Some(_paris_id) => {
                 udp_packet.set_destination(DST_BASE_PORT);
                 udp_packet.set_length(0x00);
                 udp_packet.set_payload(&vec![0x00; 2]);
@@ -330,7 +330,7 @@ impl<'a> TraceHopsIterator<'a> {
                 println!("classic traceroute");
                 tcp_packet.set_destination(self.seq_num + self.spec.tcp_dest_port);
             }
-            Some(paris_id) => {
+            Some(_paris_id) => {
                 tcp_packet.set_destination(self.spec.tcp_dest_port);
                 tcp_packet.set_payload(&vec![0x00; 2]);
                 let temp_checksum = PacketType::TCP(tcp_packet.to_immutable())
@@ -856,7 +856,8 @@ impl<'a> TraceHopsIterator<'a> {
             // Using nonblocking mode will have CPU go to 100%, unless we use epoll
             // which is in turn heavily platform specific, so we prefer blocking.
             self.socket_in
-                .set_read_timeout(Some(Duration::seconds(self.spec.timeout).to_std().unwrap()));
+                .set_read_timeout(Some(Duration::seconds(self.spec.timeout).to_std().unwrap()))
+                .unwrap();
 
             'timeout: while SteadyTime::now() < start_time + Duration::seconds(self.spec.timeout) {
                 // let read_tcp = match socket_out.recv_from(buf_in.as_mut_slice()) {

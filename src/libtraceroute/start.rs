@@ -137,7 +137,7 @@ pub fn get_sock_addr<'a>(af: &AddressFamily, port: u16) -> SocketAddr {
         .nth(0)
         .unwrap();
 
-    SocketAddr::new(interface, 0)
+    SocketAddr::new(interface, port)
 }
 
 /// Run-of-the-mill icmp ipv4/ipv6 traceroute implementation (for now)

@@ -1,4 +1,3 @@
-#[macro_use]
 use structopt;
 
 // use serde;
@@ -72,6 +71,7 @@ const DEFAULT_PARIS_ID: u8 = 0x0F;
 const DEFAULT_START_TTL: u16 = 0; // yeah,yeah, wasting a byte here, but we're going to sum this with DST_BASE_PORT
 const DEFAULT_MAX_HOPS: u16 = 255; // max hops to hopperdehop
 
+#[allow(non_snake_case)]
 #[derive(Debug, StructOpt)]
 #[structopt(
     name = "atlas-traceroute",
