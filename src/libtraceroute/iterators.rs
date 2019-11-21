@@ -889,6 +889,12 @@ impl<'a> TraceHopsIterator<'a> {
         let mut trace_hops: Vec<HopOrError> =
             Vec::with_capacity(self.spec.packets_per_hop as usize);
 
+        // binding the src_addr makes sure no temporary
+        // ipv6 addresses are created to send the packet.
+        // Temporary ipv6 addresses (a privacy feature) will
+        // result in wrong UDP/TCP checksums, since that
+        // will use the secured IPv6 address of the interface
+        // sending as the src_addr to calculate checksums with.
         self.socket_out
             .bind(&SockAddr::from(self.src_addr))
             .unwrap();
