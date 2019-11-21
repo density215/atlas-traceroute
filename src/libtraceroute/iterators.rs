@@ -53,10 +53,6 @@ enum IcmpPacketIn {
     V6(Icmpv6Packet<'static>),
 }
 
-fn make_icmp6_packet(payload: &[u8]) -> Icmpv6Packet {
-    Icmpv6Packet::new(&payload).unwrap()
-}
-
 #[derive(Debug)]
 pub struct TraceHopsIterator<'a> {
     pub dst_addr: SocketAddr,
@@ -312,7 +308,7 @@ impl<'a> TraceHopsIterator<'a> {
 
         match &self.src_addr {
             SocketAddr::V4(_) => {
-                tcp_buffer = vec![00u8; 40];
+                tcp_buffer = vec![00u8; TCP_HEADER_LEN];
             }
             SocketAddr::V6(_) => {
                 tcp_buffer = vec![00u8; 22];
