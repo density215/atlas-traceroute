@@ -10,7 +10,7 @@ use std::fmt;
 use std::iter::Iterator;
 use std::str::FromStr;
 
-use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+use socket2::{SockAddr, Socket};
 use std::io::{self, Error, ErrorKind};
 use std::net::{IpAddr, SocketAddr};
 
@@ -83,8 +83,6 @@ pub struct HopTimeOutError {
     pub line: usize,
     pub column: usize,
 }
-
-type ResultVec = Vec<HopOrError>;
 
 #[derive(Debug)]
 pub enum HopOrError {
@@ -224,58 +222,6 @@ impl<'a> PacketType<'a> {
 }
 
 impl<'a> TraceHopsIterator<'a> {
-    // TODO: refactor to be only used for OUTGOING socket.
-    fn create_socket(&self, out: bool) -> Socket {
-        let af = &self.src_addr;
-        let protocol = match (out, &self.spec.proto) {
-            (false, _) => match af {
-                &SocketAddr::V4(_) => Some(<Protocol>::icmpv4()),
-                &SocketAddr::V6(_) => Some(<Protocol>::icmpv6()),
-            },
-            (true, &TraceProtocol::ICMP) => match af {
-                &SocketAddr::V4(_) => Some(<Protocol>::icmpv4()),
-                &SocketAddr::V6(_) => Some(<Protocol>::icmpv6()),
-            },
-            (true, &TraceProtocol::UDP) => Some(<Protocol>::udp()),
-            (true, &TraceProtocol::TCP) => Some(<Protocol>::tcp()),
-        };
-
-        let sock_type = match (out, &self.spec.proto) {
-            (false, _) => Type::raw(),
-            (true, &TraceProtocol::ICMP) => Type::raw(),
-            (true, &TraceProtocol::UDP) => Type::raw(),
-            (true, &TraceProtocol::TCP) => Type::raw(),
-        };
-
-        let socket_out = match &self.src_addr {
-            SocketAddr::V4(ip) => Socket::new(Domain::ipv4(), sock_type, protocol).unwrap(),
-            SocketAddr::V6(ip) => Socket::new(Domain::ipv6(), sock_type, protocol).unwrap(),
-        };
-        socket_out.set_reuse_address(true).unwrap();
-        // disable nagle's algo
-        socket_out.set_nodelay(true);
-
-        // binding the src_addr makes sure no temporary
-        // ipv6 addresses are created to send the packet.
-        // Temporary ipv6 addresses (a privacy feature) will
-        // result in wrong UDP/TCP checksums, since that
-        // will use the secured IPv6 address of the interface
-        // sending as the src_addr to calculate checksums with.
-        socket_out.bind(&SockAddr::from(self.src_addr)).unwrap();
-
-        //println!("{:?}", self.src_addr);
-        //socket_out.bind(&self.src_addr).unwrap();
-        //let dst_addr = <SockAddr>::from(self.dst_addr);
-        //socket_out.connect(&dst_addr).unwrap();
-        // socket_out
-        //     .set_nonblocking(false)
-        //     .expect("Cannot set socket to blocking mode");
-        // socket_out
-        //     .set_read_timeout(Some(Duration::seconds(PACKET_IN_TIMEOUT).to_std().unwrap()))
-        //     .expect("Cannot set read timeout on socket");
-        socket_out
-    }
-
     fn make_icmp_packet_out(&self) -> Vec<u8> {
         match &self.src_addr {
             &SocketAddr::V4(_) => {
@@ -843,16 +789,10 @@ impl<'a> TraceHopsIterator<'a> {
         self.socket_out
             .bind(&SockAddr::from(self.src_addr))
             .unwrap();
-        // let socket_out = self.create_socket(true);
-        self.socket_out.set_reuse_address(true)?;
-        // let af = match &self.src_addr {
-        //     &SocketAddr::V4(ip) => AddressFamily::V4,
-        //     &SocketAddr::V6(ip) => AddressFamily::V6,
-        // };
-        let src = SocketAddr::new(self.src_addr.ip(), self.ident);
 
-        //socket_out.bind(&src).unwrap();
-        // socket_out.set_nonblocking(true).unwrap();
+        self.socket_out.set_reuse_address(true)?;
+
+        let src = SocketAddr::new(self.src_addr.ip(), self.ident);
 
         'trt: for count in 0..self.spec.packets_per_hop {
             let ttl = self.set_ttl(&self.socket_out);
