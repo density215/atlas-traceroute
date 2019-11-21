@@ -214,8 +214,10 @@ fn main() {
     // TODO: no improvement at all,
     // in fact swallows the error message while still panicing.
     match sync_start_with_timeout(addr, &spec) {
-        Ok(t) => {
-            for result in t {
+        Ok(mut traceroute) => {
+            traceroute.start_time = Some(time::get_time().sec);
+            println!("traceroute meta: {:?}", traceroute);
+            for result in traceroute.trace_hops {
                 match &result {
                     Err(e) => {
                         println!("{:?}", e);

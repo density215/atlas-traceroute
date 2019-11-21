@@ -9,8 +9,7 @@ use time::Duration;
 #[derive(Debug)]
 pub struct TraceRoute<'a> {
     pub spec: &'a TraceRouteSpec,
-    pub start_src_addr: &'a SockAddr,
-    pub start_dst_addr: &'a SocketAddr,
+    pub start_time: Option<i64>,
     pub trace_hops: TraceHopsIterator<'a>,
 }
 
@@ -20,8 +19,10 @@ impl<'a> TraceRoute<'a> {
         start_src_addr: SocketAddr,
         start_dst_addr: SocketAddr,
         socket_in: Socket,
-    ) -> TraceHopsIterator {
-        TraceHopsIterator {
+            // Do not the current timestamp as start_time here, since the iterator is lazy,
+            // so None indicates that the iterator has not been run and no attemtps have been
+            // made to send packets.
+            start_time: None,
             spec: spec,
             src_addr: start_src_addr,
             dst_addr: start_dst_addr,
