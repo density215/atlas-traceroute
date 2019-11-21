@@ -33,7 +33,14 @@ pub fn create_socket_out(proto: &TraceProtocol, src_addr: IpAddr) -> Socket {
 
     socket_out.set_reuse_address(true).unwrap();
     // disable nagle's algo
-    socket_out.set_nodelay(true);
+    // Nagle's is only for TCP socket connections,
+    // so not raw sockets.
+    // match proto {
+    //     TraceProtocol::TCP => {
+    //         socket_out.set_nodelay(true).unwrap();
+    //     }
+    //     _ => {}
+    // };
     socket_out
 }
 
