@@ -200,10 +200,7 @@ fn main() {
         public_ip: opt.public_ip,
         verbose: opt.verbose,
     };
-    // println!("dst_name: {}", env::args().nth(1).unwrap());
 
-    // TODO: no improvement at all,
-    // in fact swallows the error message while still panicing.
     match sync_start_with_timeout(addr, &spec) {
         Ok(mut traceroute) => {
             traceroute.start_time = Some(time::get_time().sec);
