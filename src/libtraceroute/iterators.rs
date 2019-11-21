@@ -305,39 +305,8 @@ impl<'a> TraceHopsIterator<'a> {
         let udp_buffer = vec![0x00; UDP_HEADER_LEN + 0x02];
         let mut udp_packet = MutableUdpPacket::owned(udp_buffer).unwrap();
         udp_packet.set_source(SRC_BASE_PORT);
-        let src_ip_enum: IpAddr;
-        let dst_ip_enum: IpAddr;
-
-        match &self.src_addr {
-            SocketAddr::V4(ip) => {
-                src_ip_enum = IpAddr::V4(
-                    *<SockAddr>::from(self.src_addr)
-                        .as_inet()
-                        .expect("invalid source address")
-                        .ip(),
-                );
-                dst_ip_enum = IpAddr::V4(
-                    *<SockAddr>::from(self.dst_addr)
-                        .as_inet()
-                        .expect("invalid destination address")
-                        .ip(),
-                )
-            }
-            SocketAddr::V6(ip) => {
-                src_ip_enum = IpAddr::V6(
-                    *<SockAddr>::from(self.src_addr)
-                        .as_inet6()
-                        .expect("invalid source address")
-                        .ip(),
-                );
-                dst_ip_enum = IpAddr::V6(
-                    *<SockAddr>::from(self.dst_addr)
-                        .as_inet6()
-                        .expect("invalid destination address")
-                        .ip(),
-                )
-            }
-        }
+        let src_ip: IpAddr = self.src_addr.ip();
+        let dst_ip: IpAddr = self.dst_addr.ip();
 
         match self.spec.paris {
             // 'classic' traceroute
@@ -369,7 +338,7 @@ impl<'a> TraceHopsIterator<'a> {
                 udp_packet.set_length(0x00);
                 udp_packet.set_payload(&vec![0x00; 2]);
                 let temp_checksum = PacketType::UDP(udp_packet.to_immutable())
-                    .checksum_for_af(&src_ip_enum, &dst_ip_enum)
+                    .checksum_for_af(&src_ip, &dst_ip)
                     - 0x0a
                     - self.seq_num;
                 if self.spec.verbose {
@@ -382,7 +351,7 @@ impl<'a> TraceHopsIterator<'a> {
         udp_packet.set_source(SRC_BASE_PORT);
         udp_packet.set_length(0x0a);
         let udp_checksum =
-            PacketType::UDP(udp_packet.to_immutable()).checksum_for_af(&src_ip_enum, &dst_ip_enum);
+            PacketType::UDP(udp_packet.to_immutable()).checksum_for_af(&src_ip, &dst_ip);
         udp_packet.set_checksum(udp_checksum);
         if self.spec.verbose {
             println!("udp checksum: {:02x}", udp_checksum);
@@ -392,38 +361,14 @@ impl<'a> TraceHopsIterator<'a> {
 
     fn make_tcp_packet_out(&self) -> Vec<u8> {
         let tcp_buffer: Vec<u8>;
-        let src_ip_enum: IpAddr;
-        let dst_ip_enum: IpAddr;
+        let src_ip: &IpAddr = &self.src_addr.ip();
+        let dst_ip: &IpAddr = &self.dst_addr.ip();
 
         match &self.src_addr {
-            SocketAddr::V4(ip) => {
-                src_ip_enum = IpAddr::V4(
-                    *<SockAddr>::from(self.src_addr)
-                        .as_inet()
-                        .expect("invalid source address")
-                        .ip(),
-                );
-                dst_ip_enum = IpAddr::V4(
-                    *<SockAddr>::from(self.dst_addr)
-                        .as_inet()
-                        .expect("invalid destination address")
-                        .ip(),
-                );
+            SocketAddr::V4(_) => {
                 tcp_buffer = vec![00u8; 40];
             }
-            SocketAddr::V6(ip) => {
-                src_ip_enum = IpAddr::V6(
-                    *<SockAddr>::from(self.src_addr)
-                        .as_inet6()
-                        .expect("invalid source address")
-                        .ip(),
-                );
-                dst_ip_enum = IpAddr::V6(
-                    *<SockAddr>::from(self.dst_addr)
-                        .as_inet6()
-                        .expect("invalid destination address")
-                        .ip(),
-                );
+            SocketAddr::V6(_) => {
                 tcp_buffer = vec![00u8; 22];
             }
         }
@@ -447,7 +392,7 @@ impl<'a> TraceHopsIterator<'a> {
                 tcp_packet.set_destination(self.spec.tcp_dest_port);
                 tcp_packet.set_payload(&vec![0x00; 2]);
                 let temp_checksum = PacketType::TCP(tcp_packet.to_immutable())
-                    .checksum_for_af(&src_ip_enum, &dst_ip_enum)
+                    .checksum_for_af(src_ip, dst_ip)
                     - 0x0a
                     - self.seq_num;
                 if self.spec.verbose {
@@ -459,13 +404,13 @@ impl<'a> TraceHopsIterator<'a> {
         }
 
         let tcp_checksum = PacketType::TCP(TcpPacket::new(&tcp_packet.packet()).unwrap())
-            .checksum_for_af(&src_ip_enum, &dst_ip_enum);
+            .checksum_for_af(src_ip, dst_ip);
         tcp_packet.set_checksum(tcp_checksum);
         if self.spec.verbose {
             println!("tcp checksum: {:02x}", tcp_checksum);
             println!("packet created: {:02x}", &tcp_packet.packet().as_hex());
-            println!("src used in checksum: {:?}", &src_ip_enum);
-            println!("dst used in checksum: {:?}", &dst_ip_enum);
+            println!("src used in checksum: {:?}", src_ip);
+            println!("dst used in checksum: {:?}", dst_ip);
         }
         tcp_packet.packet().to_owned()
     }
