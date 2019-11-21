@@ -373,14 +373,14 @@ impl<'a> TraceHopsIterator<'a> {
 
         let ttl_in: u8;
         match &self.src_addr {
-            SocketAddr::V4(ip) => {
+            SocketAddr::V4(_) => {
                 let pack = Ipv4Packet::owned(buf_in.to_owned()).unwrap();
                 ttl_in = pack.get_ttl();
                 (IcmpPacketIn::V4(pack), ttl_in)
             }
             // IPv6 holds IP header of incoming packet in ancillary data, so
             // we unpack the ICMPv6 packet directly here.
-            SocketAddr::V6(ip) => {
+            SocketAddr::V6(_) => {
                 let icmp_pack = Icmpv6Packet::owned(buf_in.to_owned()).unwrap();
                 let ip_pack = Ipv6Packet::owned(buf_in.to_owned()).unwrap();
                 (IcmpPacketIn::V6(icmp_pack), ip_pack.get_hop_limit())
@@ -746,12 +746,12 @@ impl<'a> TraceHopsIterator<'a> {
         // In IPv6 IP_TTL is NOT called IPV6_TTL, but
         // IPV6_UNICAST_HOPS
         match &self.src_addr {
-            SocketAddr::V4(ip) => {
+            SocketAddr::V4(_) => {
                 //println!("socket ttl: {:?}", self.ttl);
                 socket.set_ttl(self.ttl as u32)?;
                 socket.ttl()
             }
-            SocketAddr::V6(ip) => {
+            SocketAddr::V6(_) => {
                 socket.set_unicast_hops_v6(self.ttl as u32)?;
                 socket.unicast_hops_v6()
             }
