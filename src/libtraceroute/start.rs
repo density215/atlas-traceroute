@@ -1,10 +1,12 @@
-use pnet::datalink::NetworkInterface;
-
-use crate::libtraceroute::iterators::{TraceHopsIterator, DST_BASE_PORT, SRC_BASE_PORT};
-use socket2::*;
 use std::io::{self, Error, ErrorKind};
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+
+use pnet::datalink::NetworkInterface;
+use socket2::*;
 use time::Duration;
+
+use crate::libtraceroute::iterators::{TraceHopsIterator, DST_BASE_PORT, SRC_BASE_PORT};
+use crate::rawsocket::async_std::RawSocket;
 
 // The outgoing is socket is always of type ICMP,
 // which is strictly not necessary for UDP or TCP (you can set ttl on
@@ -62,7 +64,7 @@ impl<'a> TraceRoute<'a> {
         spec: &TraceRouteSpec,
         start_src_addr: SocketAddr,
         start_dst_addr: SocketAddr,
-        socket_in: Socket,
+        socket_in: RawSocket,
         socket_out: Socket,
     ) -> TraceRoute {
         TraceRoute {
@@ -179,7 +181,7 @@ pub fn sync_start_with_timeout<'a, T: ToSocketAddrs>(
     // all OSes (since we depend on lipcap anyway)?
 
     let src_addr;
-    let socket_in;
+    // let socket_in;
     let af: AddressFamily;
 
     // figure out the address family from the destination address.
@@ -187,21 +189,26 @@ pub fn sync_start_with_timeout<'a, T: ToSocketAddrs>(
         SocketAddr::V4(_) => {
             src_addr = get_sock_addr(&AddressFamily::V4, SRC_BASE_PORT);
             af = AddressFamily::V4;
-            socket_in = Socket::new(Domain::ipv4(), Type::raw(), Some(<Protocol>::icmpv4()))?;
+            // *not* specifying a protocol will work for IPv4, but *NOT* for IPv6,
+            // set both.
+            // socket_in = Socket::new(Domain::ipv4(), Type::raw(), Some(<Protocol>::icmpv4()))?;
             dst_addr.set_port(DST_BASE_PORT)
         }
         SocketAddr::V6(_) => {
             src_addr = get_sock_addr(&AddressFamily::V6, SRC_BASE_PORT);
             af = AddressFamily::V6;
-            socket_in = Socket::new(Domain::ipv6(), Type::raw(), Some(<Protocol>::icmpv6()))?;
+            // *not* specifying a protocol will work for IPv4, but *NOT* for IPv6,
+            // will result in all errors.
+            // set both.
+            // socket_in = Socket::new(Domain::ipv6(), Type::raw(), Some(<Protocol>::icmpv6()))?;
             dst_addr.set_port(DST_BASE_PORT)
         }
     };
-
-    socket_in.set_reuse_address(true).unwrap();
-    socket_in
-        .set_nonblocking(false)
-        .expect("Cannot set socket to blocking mode");
+    let socket_in = async_std::task::block_on(async { RawSocket::bind(&src_addr).await }).unwrap();
+    // socket_in.set_reuse_address(true).unwrap();
+    // socket_in
+    //     .set_nonblocking(false)
+    //     .expect("Cannot set socket to blocking mode");
 
     println!("af: IP{:?}", af);
     println!("src_addr: {:?}", src_addr);

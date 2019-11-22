@@ -41,6 +41,9 @@ use hex_slice::AsHex;
 use super::debug::debug_print_packet_in;
 use super::start::{TraceProtocol, TraceRouteSpec};
 
+use crate::rawsocket::async_std::RawSocket;
+use async_std::future;
+
 pub const MAX_PACKET_SIZE: usize = 4096 + 128;
 pub const ICMP_HEADER_LEN: usize = 8;
 pub const UDP_HEADER_LEN: usize = 8;
@@ -63,7 +66,7 @@ pub struct TraceHopsIterator<'a> {
     pub spec: &'a TraceRouteSpec,
     // invariants for this tr
     pub src_addr: SocketAddr,
-    pub socket_in: Socket,
+    pub socket_in: RawSocket,
     pub socket_out: Socket,
     // mutable state
     pub ttl: u16,
@@ -854,121 +857,127 @@ impl<'a> TraceHopsIterator<'a> {
             // timeouts while using a blocking mode socket.
             // Using nonblocking mode will have CPU go to 100%, unless we use epoll
             // which is in turn heavily platform specific, so we prefer blocking.
-            self.socket_in
-                .set_read_timeout(Some(Duration::seconds(self.spec.timeout).to_std().unwrap()))
-                .unwrap();
+            // async_std::task::block_on(async {
+            //     let socket_in = self.socket_in.await?;
+            //     socket_in
+            //         .set_read_timeout(Some(Duration::seconds(self.spec.timeout).to_std().unwrap()))
+            //         .unwrap();
+            // });
 
-            'timeout: while SteadyTime::now() < start_time + Duration::seconds(self.spec.timeout) {
-                // let read_tcp = match socket_out.recv_from(buf_in.as_mut_slice()) {
-                //     Err(ref err) if err.kind() == ErrorKind::WouldBlock => {
-                //         //println!("blup!");
-                //         continue 'timeout;
-                //     }
-                //     Err(e) => {
-                //         println!("error in rcv_from: {:?}", e);
-                //         Err(e)
-                //     }
-                //     Ok((len, s)) => {
-                //         println!("got a tcp packet");
-                //         Ok((len, s, SteadyTime::now() - start_time))
-                //     }
-                // };
+            // 'timeout: while SteadyTime::now() < start_time + Duration::seconds(self.spec.timeout) {
+            // let read_tcp = match socket_out.recv_from(buf_in.as_mut_slice()) {
+            //     Err(ref err) if err.kind() == ErrorKind::WouldBlock => {
+            //         //println!("blup!");
+            //         continue 'timeout;
+            //     }
+            //     Err(e) => {
+            //         println!("error in rcv_from: {:?}", e);
+            //         Err(e)
+            //     }
+            //     Ok((len, s)) => {
+            //         println!("got a tcp packet");
+            //         Ok((len, s, SteadyTime::now() - start_time))
+            //     }
+            // };
+            let read = match async_std::task::block_on(async {
+                let dur = std::time::Duration::from_millis(1000 * self.spec.timeout as u64);
+                // TODO: handle the timeout properly, this just panics after timeout.
+                future::timeout(dur, self.socket_in.recv_from(buf_in.as_mut_slice()))
+                    .await
+                    .unwrap()
+            }) {
+                Err(e) => {
+                    println!("error in rcv_from: {:?}", e);
+                    Err(e)
+                }
+                Ok((len, s)) => Ok((len, s, SteadyTime::now() - start_time)),
+            };
 
-                let read = match self.socket_in.recv_from(buf_in.as_mut_slice()) {
-                    Err(ref err) if err.kind() == ErrorKind::WouldBlock => {
-                        //println!("blip!");
-                        continue 'timeout;
-                    }
-                    Err(e) => {
-                        //println!("error in rcv_from: {:?}", e);
-                        Err(e)
-                    }
-                    Ok((len, s)) => Ok((len, s, SteadyTime::now() - start_time)),
-                };
+            let (packet_len, sender, rtt) = read?;
+            // let (packet_len, sender, rtt) = match read {
+            //     Ok(recv) => recv,
+            //     _ => {
+            //         println!("blergh!");
+            //         // continue 'timeout;
+            //     }
+            // };
 
-                let (packet_len, sender, rtt) = match read {
-                    Ok(recv) => recv,
-                    _ => {
-                        continue 'timeout;
-                    }
-                };
+            // The IP packet that wraps the incoming ICMP message.
+            let (packet_in, ttl_in) = self.unwrap_payload_ip_packet_in(&buf_in);
 
-                // The IP packet that wraps the incoming ICMP message.
-                let (packet_in, ttl_in) = self.unwrap_payload_ip_packet_in(&buf_in);
-
-                match packet_in {
-                    IcmpPacketIn::V6(icmp_packet_in) => {
-                        match self.analyse_v6_payload(&packet_out, &icmp_packet_in) {
-                            Ok(()) => {
-                                let host = SocketAddr::V6(sender.as_inet6().unwrap());
-                                hop = HopOrError::HopOk(TraceHop {
-                                    ttl: ttl_in,
-                                    size: packet_len,
-                                    from: FromIp(host),
-                                    hop_name: lookup_addr(&host.ip()).unwrap(),
-                                    rtt: HopDuration(rtt),
-                                });
-                                // we've got a positive result,
-                                // so break out of the while loop
-                                break 'timeout;
-                            }
-                            Err(ref err)
-                                if err.kind() == ErrorKind::InvalidData
-                                    || err.kind() == ErrorKind::Other =>
-                            {
-                                if self.spec.verbose {
-                                    println!("Error occurred");
-                                    println!("{:?}", err);
-                                };
-                                hop = HopOrError::HopError(HopTimeOutError {
-                                    message: "*".to_string(),
-                                    line: 0,
-                                    column: 0,
-                                });
-                                // this packet might not be meant for this tracehop,
-                                // so DO NOT break the while loop and listen for some
-                                // other packet that might come in.
-                                continue 'timeout;
-                            }
-                            Err(e) => trace_hops.push(HopOrError::HopError(HopTimeOutError {
-                                message: e.to_string(),
+            match packet_in {
+                IcmpPacketIn::V6(icmp_packet_in) => {
+                    match self.analyse_v6_payload(&packet_out, &icmp_packet_in) {
+                        Ok(()) => {
+                            let host = SocketAddr::V6(sender.as_inet6().unwrap());
+                            hop = HopOrError::HopOk(TraceHop {
+                                ttl: ttl_in,
+                                size: packet_len,
+                                from: FromIp(host),
+                                hop_name: lookup_addr(&host.ip()).unwrap(),
+                                rtt: HopDuration(rtt),
+                            });
+                            // we've got a positive result,
+                            // so break out of the while loop
+                            // break 'timeout;
+                        }
+                        Err(ref err)
+                            if err.kind() == ErrorKind::InvalidData
+                                || err.kind() == ErrorKind::Other =>
+                        {
+                            if self.spec.verbose {
+                                println!("Error occurred");
+                                println!("{:?}", err);
+                            };
+                            hop = HopOrError::HopError(HopTimeOutError {
+                                message: "*".to_string(),
                                 line: 0,
                                 column: 0,
-                            })),
+                            });
+                            // this packet might not be meant for this tracehop,
+                            // so DO NOT break the while loop and listen for some
+                            // other packet that might come in.
+                            // continue 'timeout;
                         }
+                        Err(e) => trace_hops.push(HopOrError::HopError(HopTimeOutError {
+                            message: e.to_string(),
+                            line: 0,
+                            column: 0,
+                        })),
                     }
-                    IcmpPacketIn::V4(ip_packet_in) => {
-                        let ip_payload = ip_packet_in.payload();
-                        let icmp_packet_in = IcmpPacket::new(&ip_packet_in.payload()).unwrap();
-                        match self.analyse_v4_payload(&packet_out, &icmp_packet_in, &ip_payload) {
-                            Ok(()) => {
-                                let host = SocketAddr::V4(sender.as_inet().unwrap());
-                                hop = HopOrError::HopOk(TraceHop {
-                                    ttl: ttl_in,
-                                    size: packet_len,
-                                    from: FromIp(host),
-                                    hop_name: lookup_addr(&host.ip()).unwrap(),
-                                    rtt: HopDuration(rtt),
-                                });
+                }
+                IcmpPacketIn::V4(ip_packet_in) => {
+                    let ip_payload = ip_packet_in.payload();
+                    let icmp_packet_in = IcmpPacket::new(&ip_packet_in.payload()).unwrap();
+                    match self.analyse_v4_payload(&packet_out, &icmp_packet_in, &ip_payload) {
+                        Ok(()) => {
+                            let host = SocketAddr::V4(sender.as_inet().unwrap());
+                            hop = HopOrError::HopOk(TraceHop {
+                                ttl: ttl_in,
+                                size: packet_len,
+                                from: FromIp(host),
+                                hop_name: lookup_addr(&host.ip()).unwrap(),
+                                rtt: HopDuration(rtt),
+                            });
 
-                                break 'timeout;
+                            // break 'timeout;
+                        }
+                        err => {
+                            if self.spec.verbose {
+                                println!("* Error occured");
+                                println!("{:?}", err);
                             }
-                            err => {
-                                if self.spec.verbose {
-                                    println!("* Error occured");
-                                    println!("{:?}", err);
-                                }
-                                hop = HopOrError::HopError(HopTimeOutError {
-                                    message: "* wut?".to_string(),
-                                    line: 0,
-                                    column: 0,
-                                });
-                                continue 'timeout;
-                            }
+                            hop = HopOrError::HopError(HopTimeOutError {
+                                message: "* wut?".to_string(),
+                                line: 0,
+                                column: 0,
+                            });
+                            // continue 'timeout;
                         }
                     }
                 }
             }
+            // }
             trace_hops.push(hop);
         }
         trace_result.result = trace_hops;
