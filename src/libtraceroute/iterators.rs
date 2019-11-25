@@ -837,7 +837,7 @@ impl<'a> TraceHopsIterator<'a> {
             assert_eq!(wrote, packet_out.len());
             let start_time = SteadyTime::now();
 
-            let mut read: Result<(usize, SockAddr, Duration), Error>;
+            // let mut read: Result<(usize, SockAddr, Duration), Error>;
             let sender: SockAddr;
             let packet_len: usize;
             let rtt: Duration;
@@ -879,18 +879,28 @@ impl<'a> TraceHopsIterator<'a> {
             //         Ok((len, s, SteadyTime::now() - start_time))
             //     }
             // };
-            let read = match async_std::task::block_on(async {
+            // let futureRead: std::result::Result<std::result::Result<(usize, socket2::SockAddr), std::io::Error>, std::io::Error>;
+            let read: Result<(usize, socket2::SockAddr, time::Duration), std::io::Error>;
+            match async_std::task::block_on(async {
                 let dur = std::time::Duration::from_millis(1000 * self.spec.timeout as u64);
-                // TODO: handle the timeout properly, this just panics after timeout.
-                future::timeout(dur, self.socket_in.recv_from(buf_in.as_mut_slice()))
-                    .await
-                    .unwrap()
+                future::timeout(dur, self.socket_in.recv_from(buf_in.as_mut_slice())).await
             }) {
-                Err(e) => {
-                    println!("error in rcv_from: {:?}", e);
-                    Err(e)
+                Ok(r) => {
+                    let (len, s) = r?;
+                    read = Ok((len, s, SteadyTime::now() - start_time));
                 }
-                Ok((len, s)) => Ok((len, s, SteadyTime::now() - start_time)),
+                Err(e) => {
+                    println!("future timeout for hop {}: {:?}", self.ttl, e);
+                    // Err(std::io::Error::new(ErrorKind::Other, "timeout"))
+                    // read = Err(e)
+                    trace_hops.push(HopOrError::HopError(HopTimeOutError {
+                        message: "* wut?".to_string(),
+                        line: 0,
+                        column: 0,
+                    }));
+                    // read = Err(std::io::Error::new(ErrorKind::Other, "timeout"));
+                    continue 'trt;
+                }
             };
 
             let (packet_len, sender, rtt) = read?;
