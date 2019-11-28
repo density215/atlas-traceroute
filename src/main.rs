@@ -12,6 +12,14 @@ use traceroute::libtraceroute::start::{
     sync_start_with_timeout, AddressFamily, TraceProtocol, TraceRouteSpec,
 };
 
+use async_std::pin::Pin;
+use async_std::prelude::*;
+use async_std::stream::Stream;
+use async_std::task::{Context, Poll};
+use traceroute::libtraceroute::iterators::{HopFutures, TraceHopsIterator};
+use traceroute::libtraceroute::start::get_sock_addr;
+use traceroute::rawsocket::async_std::RawSocket;
+
 // use trac::d::*;
 
 // „I prefer zeroes on the loose
@@ -146,6 +154,27 @@ struct TraceRouteOpt {
     verbose: bool,
 }
 
+// impl Stream for TraceHopsIterator {
+//     type Item = u8;
+//     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+//         if self.done {
+//             return Poll::Ready(None);
+//         }
+//         let trace_result = match self.next_hop() {
+//             Ok(r) => r.hop,
+//             Err(e) => {
+//                 // This is a fatal condition,
+//                 // probably a socket that cannot be opened,
+//                 // or a packet that just gets stuck on its way out of localhost.
+//                 // gracefully end all this.
+//                 self.done = true;
+//                 0
+//             }
+//         };
+
+//         Poll::Ready(Some(trace_result))
+//     }
+// }
 fn main() {
     println!("type: traceroute");
     let opt = TraceRouteOpt::from_args();
@@ -200,26 +229,36 @@ fn main() {
         public_ip: opt.public_ip,
         verbose: opt.verbose,
     };
+    let verbose = spec.verbose;
+    let src_addr = get_sock_addr(&AddressFamily::V4, 3360);
 
-    match sync_start_with_timeout(addr, &spec) {
+    let socket_in = &async_std::task::block_on(async { RawSocket::bind(&src_addr).await }).unwrap();
+    let result_buf = &HopFutures(Vec::with_capacity(
+        (spec.max_hops * spec.packets_per_hop as u16) as usize,
+    ));
+
+    match sync_start_with_timeout(addr, spec, &socket_in, &result_buf) {
         Ok(mut traceroute) => {
             traceroute.start_time = Some(time::get_time().sec);
             println!("traceroute meta: {:?}", traceroute);
-            for result in traceroute.trace_hops {
-                match &result {
-                    Err(e) => {
-                        println!("{:?}", e);
-                    }
-                    Ok(r) => {
-                        println!("{}", serde_json::to_string_pretty(r).unwrap());
-                        if spec.verbose {
-                            println!("END HOP {}", r.hop);
-                            println!("==============");
-                            println!("");
-                        };
+            async_std::task::block_on(async {
+                // let trace_hops: TraceHopsIterator = traceroute.trace_hops;
+                while let Some(result) = traceroute.trace_hops.next().await {
+                    match &result {
+                        Err(e) => {
+                            println!("{:?}", e);
+                        }
+                        Ok(r) => {
+                            println!("{}", serde_json::to_string_pretty(r).unwrap());
+                            if verbose {
+                                println!("END HOP {}", r.hop);
+                                println!("==============");
+                                println!("");
+                            };
+                        }
                     }
                 }
-            }
+            });
         }
         Err(err) => {
             println!("{}", err);

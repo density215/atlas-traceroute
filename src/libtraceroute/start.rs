@@ -5,7 +5,9 @@ use pnet::datalink::NetworkInterface;
 use socket2::*;
 use time::Duration;
 
-use crate::libtraceroute::iterators::{TraceHopsIterator, DST_BASE_PORT, SRC_BASE_PORT};
+use crate::libtraceroute::iterators::{
+    HopFutures, TraceHopsIterator, DST_BASE_PORT, SRC_BASE_PORT,
+};
 use crate::rawsocket::async_std::RawSocket;
 
 // The outgoing is socket is always of type ICMP,
@@ -48,7 +50,7 @@ pub fn create_socket_out(proto: &TraceProtocol, src_addr: IpAddr) -> Socket {
 
 #[derive(Debug)]
 pub struct TraceRoute<'a> {
-    pub spec: &'a TraceRouteSpec,
+    // pub spec: &'a TraceRouteSpec,
     pub start_src_addr: IpAddr,
     pub start_dst_addr: IpAddr,
     pub start_time: Option<i64>,
@@ -61,36 +63,37 @@ pub struct TraceRoute<'a> {
 // will be mutated while the iterator is consumed!
 impl<'a> TraceRoute<'a> {
     pub fn new(
-        spec: &TraceRouteSpec,
+        spec: TraceRouteSpec,
         start_src_addr: SocketAddr,
         start_dst_addr: SocketAddr,
-        socket_in: RawSocket,
+        socket_in: &'a RawSocket,
         socket_out: Socket,
-    ) -> TraceRoute {
+        result_buf: &'a HopFutures,
+    ) -> TraceRoute<'a> {
+        let start_ttl = spec.start_ttl;
         TraceRoute {
-            spec: spec,
+            // spec: spec,
             start_src_addr: start_src_addr.ip(),
             start_dst_addr: start_dst_addr.ip(),
             // Do not the current timestamp as start_time here, since the iterator is lazy,
             // so None indicates that the iterator has not been run and no attemtps have been
             // made to send packets.
             start_time: None,
-            trace_hops: TraceHopsIterator {
-                spec: spec,
+            trace_hops: TraceHopsIterator::new(
+                spec,
                 // src_addr & dst_addr are NOT the same as start_*_addr
                 // from the TraceRoute struct.
                 // This one contains the port that may be increased
                 // per hop (classic traceroutes).
-                src_addr: start_src_addr,
-                dst_addr: start_dst_addr,
-                ttl: spec.start_ttl,
-                ident: rand::random(),
-                seq_num: spec.start_ttl,
-                done: false,
-                result: Vec::new(),
-                socket_in: socket_in,
-                socket_out: socket_out,
-            },
+                start_src_addr,
+                start_dst_addr,
+                socket_in,
+                socket_out,
+                start_ttl,
+                rand::random(),
+                start_ttl,
+                result_buf,
+            ),
         }
     }
 }
@@ -146,7 +149,9 @@ pub fn get_sock_addr<'a>(af: &AddressFamily, port: u16) -> SocketAddr {
 // Completely synchronous. Every packet that's send will trigger a wait for its return
 pub fn sync_start_with_timeout<'a, T: ToSocketAddrs>(
     address: T,
-    spec: &'a TraceRouteSpec,
+    spec: TraceRouteSpec,
+    socket_in: &'a RawSocket,
+    result_buf: &'a HopFutures,
 ) -> io::Result<TraceRoute<'a>> {
     match Duration::seconds(spec.timeout).num_microseconds() {
         None => return Err(Error::new(ErrorKind::InvalidInput, "Timeout too large")),
@@ -204,7 +209,7 @@ pub fn sync_start_with_timeout<'a, T: ToSocketAddrs>(
             dst_addr.set_port(DST_BASE_PORT)
         }
     };
-    let socket_in = async_std::task::block_on(async { RawSocket::bind(&src_addr).await }).unwrap();
+    // let socket_in = async_std::task::block_on(async { RawSocket::bind(&src_addr).await }).unwrap();
     // socket_in.set_reuse_address(true).unwrap();
     // socket_in
     //     .set_nonblocking(false)
@@ -216,7 +221,17 @@ pub fn sync_start_with_timeout<'a, T: ToSocketAddrs>(
     println!("timestamp: {:?}", time::get_time().sec);
 
     let socket_out = create_socket_out(&spec.proto, src_addr.ip());
-    let traceroute = TraceRoute::new(spec, src_addr, dst_addr, socket_in, socket_out);
+    // let result_buf = HopFutures(Vec::with_capacity(
+    //     (spec.max_hops * spec.packets_per_hop as u16) as usize,
+    // ));
+    let traceroute = TraceRoute::new(
+        spec,
+        src_addr,
+        dst_addr,
+        &socket_in,
+        socket_out,
+        &result_buf,
+    );
 
     Ok(traceroute)
 }
