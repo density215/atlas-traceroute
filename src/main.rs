@@ -16,7 +16,10 @@ use async_std::pin::Pin;
 use async_std::prelude::*;
 use async_std::stream::Stream;
 use async_std::task::{Context, Poll};
-use traceroute::libtraceroute::iterators::{HopFutures, TraceHopsIterator};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use traceroute::libtraceroute::iterators::{
+    HopFutures, TraceHopsIterator, DST_BASE_PORT, SRC_BASE_PORT,
+};
 use traceroute::libtraceroute::start::get_sock_addr;
 use traceroute::rawsocket::async_std::RawSocket;
 
@@ -181,7 +184,8 @@ fn main() {
     println!("{:?}", opt);
     // let mut args = env::args();
     let ip: String = opt.dst_addr + ":0";
-    let addr: &str = &ip;
+
+    let mut addr_iter = ip.as_str().to_socket_addrs().unwrap();
 
     let af: Result<Option<AddressFamily>, &str> = match (opt.v4, opt.v6) {
         (true, false) => Ok(Some(AddressFamily::V4)),
@@ -230,14 +234,58 @@ fn main() {
         verbose: opt.verbose,
     };
     let verbose = spec.verbose;
-    let src_addr = get_sock_addr(&AddressFamily::V4, 3360);
+    // let src_addr = get_sock_addr(&AddressFamily::V4, 3360);
 
-    let socket_in = &async_std::task::block_on(async { RawSocket::bind(&src_addr).await }).unwrap();
     let result_buf = &HopFutures(Vec::with_capacity(
         (spec.max_hops * spec.packets_per_hop as u16) as usize,
     ));
 
-    match sync_start_with_timeout(addr, spec, &socket_in, &result_buf) {
+    // let mut addr_iter = addr.to_socket_addrs()?;
+
+    let mut dst_addr = match spec.af {
+        // No address family was specified by the user
+        // so get the first resolved address we can get our hands on.
+        // That address will determine the address family.
+        None => match addr_iter.next() {
+            Some(addr) => addr,
+            None => panic!("Cannot parse the resolved IP address(es) for requested hostname"),
+        },
+        Some(af) => addr_iter
+            .find(|addr| match (addr, af) {
+                (SocketAddr::V4(_), AddressFamily::V4) => true,
+                (SocketAddr::V6(_), AddressFamily::V6) => true,
+                _ => false,
+            })
+            .expect("Cannot match requested address family and destination address."),
+    };
+
+    let src_addr;
+    // let af: AddressFamily;
+
+    // figure out the address family from the destination address.
+    match dst_addr {
+        SocketAddr::V4(_) => {
+            src_addr = get_sock_addr(&AddressFamily::V4, SRC_BASE_PORT);
+            // af = AddressFamily::V4;
+            // *not* specifying a protocol will work for IPv4, but *NOT* for IPv6,
+            // set both.
+            // socket_in = Socket::new(Domain::ipv4(), Type::raw(), Some(<Protocol>::icmpv4()))?;
+            dst_addr.set_port(DST_BASE_PORT)
+        }
+        SocketAddr::V6(_) => {
+            src_addr = get_sock_addr(&AddressFamily::V6, SRC_BASE_PORT);
+            // af = AddressFamily::V6;
+            // *not* specifying a protocol will work for IPv4, but *NOT* for IPv6,
+            // will result in all errors.
+            // set both.
+            // socket_in = Socket::new(Domain::ipv6(), Type::raw(), Some(<Protocol>::icmpv6()))?;
+            dst_addr.set_port(DST_BASE_PORT)
+        }
+    };
+
+    let socket_in = &async_std::task::block_on(async { RawSocket::bind(&src_addr).await }).unwrap();
+
+    match sync_start_with_timeout(spec, src_addr, dst_addr, &socket_in, &result_buf) {
         Ok(mut traceroute) => {
             traceroute.start_time = Some(time::get_time().sec);
             println!("traceroute meta: {:?}", traceroute);

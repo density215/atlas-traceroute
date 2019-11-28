@@ -930,34 +930,6 @@ impl<'a> TraceHopsIterator<'a> {
             assert_eq!(wrote, packet_out.len());
             let start_time = SteadyTime::now();
 
-            // let ff = Self::hop_listen2(
-            //     self.socket_in,
-            //     start_time,
-            //     &packet_out,
-            //     self.spec.timeout as u64,
-            // );
-
-            // let f = async_std::task::block_on(self.hop_listen(
-            //     start_time,
-            //     &packet_out,
-            //     self.spec.timeout as u64,
-            // ));
-
-            // futures_list.push(Self::hop_listen2(
-            //     self.socket_in,
-            //     start_time,
-            //     packet_out,
-            //     self.spec.timeout as u64,
-            // ));
-
-            // trace_hops.push(f);
-
-            // self.result_buf.push(Box::new(ff));
-            // let hop_f: Box<dyn Future<Output = HopOrError>> =
-            //     Box::new(self.hop_listen(start_time, packet_out, self.spec.timeout as u64));
-
-            // let hop = async_std::task::block_on(f);
-
             futures_list.push(self.hop_listen(start_time, packet_out, self.spec.timeout as u64))
         }
 
@@ -981,26 +953,6 @@ impl<'a> TraceHopsIterator<'a> {
         });
         trace_result.result = trace_hops;
         Ok(trace_result)
-    }
-
-    async fn hop_listen2(
-        socket_in: &RawSocket,
-        start_time: time::SteadyTime,
-        packet_out: Vec<u8>,
-        timeout: u64,
-    ) -> HopOrError {
-        let mut buf_in = vec![0; MAX_PACKET_SIZE];
-        let dur = std::time::Duration::from_millis(1000 * timeout as u64);
-        match future::timeout(dur, socket_in.recv_from(buf_in.as_mut_slice())).await {
-            _ => {
-                println!("future timeout for hop {}: {:?}", 10, 10);
-                HopOrError::HopError(HopTimeOutError {
-                    message: "* wut?".to_string(),
-                    line: 0,
-                    column: 0,
-                })
-            }
-        }
     }
 
     async fn hop_listen(
