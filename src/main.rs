@@ -6,6 +6,7 @@ use serde_json;
 // use std::env;
 use std::path::PathBuf;
 // use std::str::FromStr;
+use std::str::FromStr;
 use structopt::StructOpt;
 
 use traceroute::libtraceroute::start::{
@@ -202,6 +203,15 @@ fn main() {
         _ => Err("cannot specify more than one protocol"),
     };
 
+    // TO_FUCKING_DO TODO: this just continues as if nothing happened on garbled input
+    let public_ip = match opt.public_ip {
+        Some(public_ip) => match <std::net::IpAddr>::from_str(public_ip.as_str()) {
+            Ok(ip) => Ok(Some(ip)),
+            Err(_) => Ok(None),
+        },
+        None => Err("No public ip address specified (should not be an error, but hey"),
+    };
+
     let spec = TraceRouteSpec {
         proto: proto.unwrap(),
         af: af.unwrap(),
@@ -230,7 +240,7 @@ fn main() {
             None => DEFAULT_PACKET_IN_TIMEOUT,
         },
         uuid: "ATLAS-TRACE-EX".to_string(),
-        public_ip: opt.public_ip,
+        public_ip: public_ip.unwrap_or(None),
         verbose: opt.verbose,
     };
     let verbose = spec.verbose;

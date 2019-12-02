@@ -49,7 +49,7 @@ use async_std::prelude::*;
 use async_std::stream::Stream;
 use async_std::task::{Context, Poll};
 use futures::{
-    future::{Fuse, FusedFuture, FutureExt},
+    future::{Fuse, FusedFuture, FutureExt, LocalBoxFuture},
     pin_mut, select,
     stream::{FusedStream, FuturesUnordered, StreamExt},
 };
@@ -461,6 +461,41 @@ impl<'a> TraceHopsIterator<'a> {
         }
     }
 
+    fn static_unwrap_payload_ip_packet_in(
+        buf_in: &[u8],
+        src_addr: SocketAddr,
+        verbose: bool,
+    ) -> (IcmpPacketIn, u8) {
+        if verbose {
+            match &buf_in[0] {
+                0x45 => {
+                    println!("src addr source packet: {:?}", &buf_in[12..16]);
+                    println!("dst addr source packet: {:?}", &buf_in[16..20]);
+                }
+                _ => {
+                    println!("src addr source packet: {:02x}", &buf_in[32..48].as_hex());
+                    println!("dst addr source packet: {:02x}", &buf_in[16..32].as_hex());
+                }
+            };
+        };
+
+        let ttl_in: u8;
+        match src_addr {
+            SocketAddr::V4(_) => {
+                let pack = Ipv4Packet::owned(buf_in.to_owned()).unwrap();
+                ttl_in = pack.get_ttl();
+                (IcmpPacketIn::V4(pack), ttl_in)
+            }
+            // IPv6 holds IP header of incoming packet in ancillary data, so
+            // we unpack the ICMPv6 packet directly here.
+            SocketAddr::V6(_) => {
+                let icmp_pack = Icmpv6Packet::owned(buf_in.to_owned()).unwrap();
+                let ip_pack = Ipv6Packet::owned(buf_in.to_owned()).unwrap();
+                (IcmpPacketIn::V6(icmp_pack), ip_pack.get_hop_limit())
+            }
+        }
+    }
+
     fn analyse_icmp_packet_in(
         &self,
         wrapped_ip_packet: &[u8],
@@ -500,7 +535,11 @@ impl<'a> TraceHopsIterator<'a> {
         let expected_packet = match self.spec.proto {
             TraceProtocol::UDP => {
                 let mut udp_packet = MutableUdpPacket::owned(packet_out.to_vec()).unwrap();
-                match &self.spec.public_ip {
+                let pub_ip = match self.spec.public_ip.unwrap() {
+                    IpAddr::V4(ip) => Some(ip),
+                    _ => None,
+                };
+                match pub_ip {
                     Some(public_ip) => {
                         // let mut udp_packet = MutableUdpPacket::owned(packet_out.to_vec()).unwrap();
                         udp_packet.set_checksum(ipv4_checksum(
@@ -508,7 +547,8 @@ impl<'a> TraceHopsIterator<'a> {
                             // the public ip address used in NAT
                             // &<std::net::Ipv4Addr>::new(83,160,104,137),
                             // the IP of the if to send this packet out (no NAT)
-                            &<std::net::Ipv4Addr>::from_str(public_ip).unwrap(),
+                            // &<std::net::Ipv4Addr>::from_str(public_ip).unwrap(),
+                            &pub_ip.unwrap(),
                             // the dst of the traceroute
                             &<std::net::Ipv4Addr>::new(
                                 icmp_packet_in[24],
@@ -524,7 +564,11 @@ impl<'a> TraceHopsIterator<'a> {
             }
             TraceProtocol::TCP => {
                 let mut tcp_packet = MutableTcpPacket::owned(packet_out.to_vec()).unwrap();
-                match &self.spec.public_ip {
+                let pub_ip = match self.spec.public_ip.unwrap() {
+                    IpAddr::V4(ip) => Some(ip),
+                    _ => None,
+                };
+                match &pub_ip {
                     Some(public_ip) => {
                         // let mut udp_packet = MutableUdpPacket::owned(packet_out.to_vec()).unwrap();
                         tcp_packet.set_checksum(tcp_ipv4_checksum(
@@ -532,7 +576,8 @@ impl<'a> TraceHopsIterator<'a> {
                             // the public ip address used in NAT
                             // &<std::net::Ipv4Addr>::new(83,160,104,137),
                             // the IP of the if to send this packet out (no NAT)
-                            &<std::net::Ipv4Addr>::from_str(public_ip).unwrap(),
+                            // &<std::net::Ipv4Addr>::from_str(public_ip).unwrap(),
+                            public_ip,
                             // the dst of the traceroute
                             &<std::net::Ipv4Addr>::new(
                                 icmp_packet_in[24],
@@ -684,6 +729,237 @@ impl<'a> TraceHopsIterator<'a> {
         }
     }
 
+    fn static_analyse_icmp_packet_in(
+        wrapped_ip_packet: &[u8],
+        icmp_packet_in: &[u8],
+        packet_out: &[u8],
+        proto: TraceProtocol,
+        public_ip: Option<IpAddr>,
+        paris: Option<u8>,
+        verbose: bool,
+    ) -> Result<(), Error> {
+        // We don't have any ICMP header data right now
+        // So we're only using the last 4 bytes in the payload to compare.
+        // println!("wrapped ip packet: {:02x}", wrapped_ip_packet[..32].as_hex());
+
+        // in TCP we witness that reflected packets are sometimes cutoff after 12 bytes,
+        // and filled with zeros up till 4176 bytes (or less).
+        // Another situation is that their length might be less than 12 bytes
+        // sent out by us as a packet.
+        // So we're taking *up to* 12 bytes of the reflected packet.
+        // println!("{:02x}",wrapped_ip_packet[..packet_out.len()].as_hex());
+        let wrapped_ip_snip: &[u8] = match packet_out.len() {
+            l if l > 12 => &wrapped_ip_packet[..12],
+            _ => &wrapped_ip_packet[..packet_out.len()],
+        };
+        // UDP paris traceroutes have to rely on the checksum of the udp header to match up the
+        // hop number of the packet sent and the icmp packet received. However if our
+        // machine is behind a NAT, then the router performning NAT will very likely rewrite
+        // the UDP checksum of the outhoing packet to match the src IP address of the public ip
+        // address, hence the --publicip option.
+        // This process has no knowledge of the public ip address, so we have to rewrite
+        // the expected IP packet to have the checksum reflect the public address as set by
+        // the user.
+        // Note that we're also checking if the incoming packet matches with our original
+        // created outgoing packet, in case the user inappropriately set the public_ip property
+        // in the spec. (like there's no NAT after all, or the public ip address is wrong).
+        // Also note that this *only* applies to UDP paris traceroutes and even then only
+        // if you want to sent packets in async/burst mode. In sync mode we sent one packet
+        // and wait for the timeout per hop and matching the source ports in the udp header
+        // is enough.
+        let pub_ip = match public_ip {
+            Some(ipip) => match ipip {
+                IpAddr::V4(ip) => Some(ip),
+                _ => panic!("wtf, this is not an ipv4 address!"),
+            },
+            None => None,
+        };
+
+        let expected_packet = match proto {
+            TraceProtocol::UDP => {
+                let mut udp_packet = MutableUdpPacket::owned(packet_out.to_vec()).unwrap();
+                match &pub_ip {
+                    Some(public_ip) => {
+                        // let mut udp_packet = MutableUdpPacket::owned(packet_out.to_vec()).unwrap();
+                        udp_packet.set_checksum(ipv4_checksum(
+                            &udp_packet.to_immutable(),
+                            // the public ip address used in NAT
+                            // &<std::net::Ipv4Addr>::new(83,160,104,137),
+                            // the IP of the if to send this packet out (no NAT)
+                            // &<std::net::Ipv4Addr>::from_str(public_ip).unwrap(),
+                            &public_ip,
+                            // the dst of the traceroute
+                            &<std::net::Ipv4Addr>::new(
+                                icmp_packet_in[24],
+                                icmp_packet_in[25],
+                                icmp_packet_in[26],
+                                icmp_packet_in[27],
+                            ),
+                        ));
+                        udp_packet.packet().to_owned()
+                    }
+                    _ => packet_out.to_owned(),
+                }
+            }
+            TraceProtocol::TCP => {
+                let mut tcp_packet = MutableTcpPacket::owned(packet_out.to_vec()).unwrap();
+                let pub_ip = match public_ip.unwrap() {
+                    IpAddr::V4(ip) => Some(ip),
+                    _ => None,
+                };
+
+                match &pub_ip {
+                    Some(public_ip) => {
+                        // let mut udp_packet = MutableUdpPacket::owned(packet_out.to_vec()).unwrap();
+                        tcp_packet.set_checksum(tcp_ipv4_checksum(
+                            &tcp_packet.to_immutable(),
+                            // the public ip address used in NAT
+                            // &<std::net::Ipv4Addr>::new(83,160,104,137),
+                            // the IP of the if to send this packet out (no NAT)
+                            // &<std::net::Ipv4Addr>::from_str(public_ip).unwrap(),
+                            public_ip,
+                            // the dst of the traceroute
+                            &<std::net::Ipv4Addr>::new(
+                                icmp_packet_in[24],
+                                icmp_packet_in[25],
+                                icmp_packet_in[26],
+                                icmp_packet_in[27],
+                            ),
+                        ));
+                        if verbose {
+                            println!("checksum rewritten using dst_addr {:?}", &public_ip);
+                        };
+                        tcp_packet.packet().to_owned()
+                    }
+                    _ => packet_out.to_owned(),
+                }
+            }
+            _ => packet_out.to_owned(),
+        };
+
+        if verbose {
+            debug_print_packet_in(&proto, &icmp_packet_in, &packet_out, &expected_packet);
+        };
+
+        match &proto {
+            &TraceProtocol::ICMP if wrapped_ip_packet[4..8] == packet_out[4..8] => Ok(()),
+            /* Some routers may return all of the udp packet we sent, so including the
+             * payload.
+             */
+            &TraceProtocol::UDP
+                if wrapped_ip_packet.to_vec() == expected_packet
+                    || wrapped_ip_packet == packet_out =>
+            {
+                if verbose {
+                    println!("😍 PERFECT MATCH (checksum, payload)");
+                };
+                Ok(())
+            }
+            /* This should be the 'normal' situation, where 8 bytes from the udp packet
+             * we sent are returned, i.e. the udp header
+             */
+            &TraceProtocol::UDP
+                if wrapped_ip_packet[..8] == expected_packet[..8]
+                    || wrapped_ip_packet[..8] == packet_out[..8] =>
+            {
+                if verbose {
+                    println!("😁 CHECKSUM MATCH (no payload)");
+                };
+                Ok(())
+            }
+            // this from the atlas traceroute probes implentation:
+            /* Unfortunately, cheap home routers may
+             * forget to restore the checksum field
+             * when they are doing NAT. Ignore the
+             * sequence number if it seems wrong.
+             */
+            &TraceProtocol::UDP
+                if wrapped_ip_packet[9..10] == expected_packet[9..10]
+                    || wrapped_ip_packet[9..10] == packet_out[9..10] =>
+            {
+                if verbose {
+                    println!("😐 PAYLOAD AND SRC PORT MATCH ONLY (no checksum)");
+                };
+                Ok(())
+            }
+            // tnis might be a hop from an earlier probe, so then
+            // dst_port should be higher than or equal to the udp base port
+            // (a constant for now), but lower than UDP_BASE_PORT + this hopnr
+            &TraceProtocol::UDP
+                if paris.is_none()
+                    && NetworkEndian::read_u16(&wrapped_ip_packet[2..4]) >= DST_BASE_PORT
+                    && NetworkEndian::read_u16(&wrapped_ip_packet[2..4])
+                        <= DST_BASE_PORT + 0xff =>
+            {
+                println!("wrong hopno! earlier hop");
+                Ok(())
+            }
+            // check to see if the source ports on the packet out and the reflected packet
+            // match up. This is for classic sync traceroute only.
+            &TraceProtocol::UDP
+                if wrapped_ip_packet[2..4] == expected_packet[2..4]
+                    || wrapped_ip_packet[2..4] == packet_out[2..4] =>
+            {
+                if verbose {
+                    println!("😐 SRC PORT MATCH ONLY (no payload, no checksum)");
+                    println!("icmp packet in: {:02x}", icmp_packet_in[..64].as_hex());
+                    println!(
+                        "returned packet snip: {:02x}",
+                        icmp_packet_in[28..36].as_hex()
+                    );
+                }
+                Ok(())
+            }
+            &TraceProtocol::TCP
+                if wrapped_ip_packet[..22] == expected_packet[..22]
+                    || wrapped_ip_packet[..22] == packet_out[..22] =>
+            {
+                if verbose {
+                    println!("😍 PACKETS MATCHED");
+                }
+                Ok(())
+            }
+            &TraceProtocol::TCP if wrapped_ip_packet[4..8] == expected_packet[4..8] => {
+                if verbose {
+                    println!("😁 SRC PORT AND SEQUENCE NUMBER MATCHED");
+                }
+                Ok(())
+            }
+            &TraceProtocol::TCP
+                if wrapped_ip_packet[16..18] == expected_packet[16..18]
+                    || wrapped_ip_packet[16..18] == packet_out[16..18] =>
+            {
+                if verbose {
+                    println!("😁 SRC PORT AND CHECKSUM MATCH (no sequence number, no payload)");
+                };
+                Ok(())
+            }
+            // see the above comment about cutting off of reflected ip packets
+            &TraceProtocol::TCP if wrapped_ip_snip == &expected_packet[..wrapped_ip_snip.len()] => {
+                if verbose {
+                    println!("😐 SRC AND DST PORT MATCH ONLY (no sequence number, no checksum, no payload)");
+                }
+                Ok(())
+            }
+            _ => {
+                if verbose {
+                    println!("😠 UNIDENTIFIED INCOMING PACKET");
+                    print!("packet out {:?}: {:02x}", &proto, &packet_out.as_hex());
+                    print!(" -> ");
+                    println!("icmp payload: {:02x}", &wrapped_ip_packet[..64].as_hex());
+                    println!(
+                        "64b of icmp in packet: {:02x}",
+                        &icmp_packet_in[..64].as_hex()
+                    );
+                };
+                Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "invalid TimeExceeded packet",
+                ))
+            }
+        }
+    }
+
     fn analyse_v4_payload(
         &self,
         packet_out: &[u8],
@@ -769,6 +1045,106 @@ impl<'a> TraceHopsIterator<'a> {
         }
     }
 
+    fn static_analyse_v4_payload(
+        packet_out: &[u8],
+        icmp_packet_in: &IcmpPacket,
+        ip_payload: &[u8],
+        ident: u16,
+        seq_num: u16,
+        max_hops: u16,
+        ttl: u16,
+        proto: TraceProtocol,
+        public_ip: Option<IpAddr>,
+        paris: Option<u8>,
+        verbose: bool,
+    ) -> (Result<(), Error>, bool) {
+        match icmp_packet_in.get_icmp_type() {
+            IcmpTypes::TimeExceeded => {
+                // This is where intermediate packets with TTL set to lower than the number of hops
+                // to the final server should be answered as.
+                //
+                // `Time Exceeded` packages do not have a identifier or sequence number
+                // They do return up to 576 bytes of the original IP packet
+                // So that's where we identify the packet to belong to this `packet_out`.
+                if ttl == max_hops {
+                    // self.done = true;
+                    return (Err(Error::new(ErrorKind::TimedOut, "too many hops")), true);
+                }
+                let icmp_time_exceeded = TimeExceededPacket::new(ip_payload)
+                    .unwrap()
+                    .payload()
+                    .to_owned();
+                let wrapped_ip_packet = Ipv4Packet::new(&icmp_time_exceeded).unwrap();
+
+                // We don't have any ICMP data right now
+                // So we're only using the last 4 bytes in the payload to compare.
+                (
+                    Self::static_analyse_icmp_packet_in(
+                        wrapped_ip_packet.payload(),
+                        &icmp_packet_in.packet(),
+                        packet_out,
+                        proto,
+                        public_ip,
+                        paris,
+                        verbose,
+                    ),
+                    false,
+                )
+            }
+
+            // If the outgoing packet was icmp then the final
+            // packages from the requested server should come as ICMP type Echo Reply
+            IcmpTypes::EchoReply => {
+                let icmp_echo_reply = EchoReplyPacket::new(&ip_payload).unwrap();
+                if icmp_echo_reply.get_identifier() == ident
+                    && icmp_echo_reply.get_sequence_number() == seq_num
+                {
+                    // self.done = true;
+                    (Ok(()), true)
+                } else {
+                    (Err(Error::new(ErrorKind::InvalidData, "invalid ")), false)
+                }
+            }
+
+            // UDP and TCP packets that were send out should get these as the final answer,
+            // that is, only if the requested server does not listen on the destination port!
+            IcmpTypes::DestinationUnreachable => {
+                // self.done = true;
+
+                let dest_unreachable = DestinationUnreachablePacket::new(&ip_payload)
+                    .unwrap()
+                    .payload()
+                    .to_owned();
+                let wrapped_ip_packet = Ipv4Packet::new(&dest_unreachable).unwrap();
+                //println!("{:02x}", wrapped_ip_packet.packet().as_hex());
+                (
+                    Self::static_analyse_icmp_packet_in(
+                        wrapped_ip_packet.payload(),
+                        &icmp_packet_in.packet(),
+                        packet_out,
+                        proto,
+                        public_ip,
+                        paris,
+                        verbose,
+                    ),
+                    true,
+                )
+            }
+            _ => {
+                if verbose {
+                    println!("unknown : {:02x}", &ip_payload.as_hex());
+                };
+                (
+                    Err(Error::new(
+                        ErrorKind::Other,
+                        "unidentified packet type - ipv4",
+                    )),
+                    false,
+                )
+            }
+        }
+    }
+
     fn analyse_v6_payload(
         &self,
         packet_out: &[u8],
@@ -833,6 +1209,81 @@ impl<'a> TraceHopsIterator<'a> {
         }
     }
 
+    fn static_analyse_v6_payload(
+        packet_out: &[u8],
+        icmp_packet_in: &Icmpv6Packet,
+        ident: u16,
+        seq_num: u16,
+        max_hops: u16,
+        ttl: u16,
+        proto: TraceProtocol,
+        public_ip: Option<IpAddr>,
+        paris: Option<u8>,
+        verbose: bool,
+    ) -> (Result<(), Error>, bool) {
+        match icmp_packet_in.get_icmpv6_type() {
+            Icmpv6Types::EchoReply => {
+                //println!("icmp payload: {:02x}", icmp_packet_in.payload().as_hex());
+                if icmp_packet_in.get_identifier() == ident
+                    && icmp_packet_in.get_sequence_number() == seq_num
+                {
+                    // self.done = true;
+                    (Ok(()), true)
+                } else {
+                    //println!("seq: {:?}", icmp_packet_in.get_sequence_number());
+                    (Err(Error::new(ErrorKind::InvalidData, "invalid ")), false)
+                }
+            }
+            Icmpv6Types::DestinationUnreachable => (
+                Err(Error::new(
+                    ErrorKind::AddrNotAvailable,
+                    "destination unreachable",
+                )),
+                false,
+            ),
+            Icmpv6Types::TimeExceeded => {
+                //println!("time exceeded: {:02x}", icmp_packet_in.payload().as_hex());
+                // `Time Exceeded` packages do not have a identifier or sequence number
+                // They do return up to 576 bytes of the original IP packet
+                // So that's where we identify the packet to belong to this `packet_out`.
+                if ttl == max_hops {
+                    // self.done = true;
+                    return (Err(Error::new(ErrorKind::TimedOut, "too many hops")), true);
+                }
+                let wrapped_ip_packet = Ipv6Packet::new(&icmp_packet_in.payload()).unwrap();
+
+                (
+                    Self::static_analyse_icmp_packet_in(
+                        wrapped_ip_packet.payload(),
+                        &icmp_packet_in.packet(),
+                        packet_out,
+                        proto,
+                        public_ip,
+                        paris,
+                        verbose,
+                    ),
+                    false,
+                )
+            }
+            _ => {
+                if verbose {
+                    println!("unknown : {:?}", icmp_packet_in.get_icmpv6_type());
+                    println!(
+                        "64b of icmp packet in : {:02x}",
+                        &icmp_packet_in.payload()[..64].as_hex()
+                    );
+                };
+                (
+                    Err(Error::new(
+                        ErrorKind::Other,
+                        "unidentified packet type - ipv6",
+                    )),
+                    false,
+                )
+            }
+        }
+    }
+
     fn set_ttl(&self, socket: &Socket) -> Result<u32, Error> {
         // In IPv6 IP_TTL is NOT called IPV6_TTL, but
         // IPV6_UNICAST_HOPS
@@ -850,7 +1301,10 @@ impl<'a> TraceHopsIterator<'a> {
     }
 
     #[allow(unused_variables)]
-    pub fn next_hop(&mut self) -> io::Result<TraceResult> {
+    pub fn next_hop(
+        &mut self,
+        future_buf: &FuturesUnordered<LocalBoxFuture<'a, (HopOrError, bool)>>,
+    ) -> io::Result<()> {
         self.seq_num += 1;
         if self.spec.verbose {
             println!("==============");
@@ -867,7 +1321,7 @@ impl<'a> TraceHopsIterator<'a> {
         self.ttl += 1;
         // let mut trace_hops: Vec<Box<dyn Future<Output = HopOrError>>> =
         //     Vec::with_capacity(self.spec.packets_per_hop as usize);
-        let mut trace_hops = Vec::with_capacity(self.spec.packets_per_hop as usize);
+        // let mut trace_hops = Vec::with_capacity(self.spec.packets_per_hop as usize);
 
         // binding the src_addr makes sure no temporary
         // ipv6 addresses are created to send the packet.
@@ -882,7 +1336,7 @@ impl<'a> TraceHopsIterator<'a> {
         self.socket_out.set_reuse_address(true)?;
 
         let src = SocketAddr::new(self.src_addr.ip(), self.ident);
-        let mut futures_list = FuturesUnordered::new();
+        // let mut futures_list = FuturesUnordered::new();
 
         'trt: for count in 0..self.spec.packets_per_hop {
             let ttl = self.set_ttl(&self.socket_out);
@@ -930,29 +1384,192 @@ impl<'a> TraceHopsIterator<'a> {
             assert_eq!(wrote, packet_out.len());
             let start_time = SteadyTime::now();
 
-            futures_list.push(self.hop_listen(start_time, packet_out, self.spec.timeout as u64))
+            // future_buf.push(
+            //     self.hop_listen(start_time, packet_out, self.spec.timeout as u64)
+            //         .boxed_local(),
+            // )
+            future_buf.push(
+                Self::static_hop_listen(
+                    &self.socket_in,
+                    start_time,
+                    packet_out,
+                    self.spec.timeout as u64,
+                    self.ttl,
+                    self.src_addr,
+                    self.spec.max_hops,
+                    self.spec.proto,
+                    self.spec.public_ip,
+                    self.spec.paris,
+                    self.ident,
+                    self.seq_num,
+                    self.spec.verbose,
+                )
+                .boxed_local(),
+            );
         }
 
-        println!("no of futures : {:?}", futures_list.len());
-        async_std::task::block_on(async {
-            let mut done: bool;
+        // println!("no of futures : {:?}", futures_list.len());
+        // async_std::task::block_on(async {
+        //     let mut done: bool;
 
-            loop {
-                select! {
-                    h = futures_list.next() => {
-                        println!("async select {:?}", h);
-                        let hh: HopOrError = match h {
-                            None => HopOrError::HopError(HopTimeOutError {message: "crazy".to_string(), line: 0, column: 0}),
-                            Some(hop) => { done = hop.1; hop.0 }
-                        };
-                        trace_hops.push(hh);
+        //     loop {
+        //         select! {
+        //             h = futures_list.next() => {
+        //                 println!("async select {:?}", h);
+        //                 let hh: HopOrError = match h {
+        //                     None => HopOrError::HopError(HopTimeOutError {message: "crazy".to_string(), line: 0, column: 0}),
+        //                     Some(hop) => { done = hop.1; hop.0 }
+        //                 };
+        //                 trace_hops.push(hh);
+        //             }
+        //             complete => { break; }
+        //         }
+        //     }
+        // });
+        // trace_result.result = trace_hops;
+        // Ok(trace_result)
+        Ok(())
+    }
+
+    async fn static_hop_listen(
+        socket_in: &'a RawSocket,
+        start_time: time::SteadyTime,
+        packet_out: Vec<u8>,
+        timeout: u64,
+        ttl: u16,
+        src_addr: SocketAddr,
+        max_hops: u16,
+        proto: TraceProtocol,
+        public_ip: Option<IpAddr>,
+        paris: Option<u8>,
+        ident: u16,
+        seq_num: u16,
+        verbose: bool,
+    ) -> (HopOrError, bool) {
+        let dur = std::time::Duration::from_millis(1000 * timeout as u64);
+        let mut buf_in: Vec<u8> = vec![0; MAX_PACKET_SIZE];
+        match future::timeout(dur, socket_in.recv_from(buf_in.as_mut_slice())).await {
+            Err(e) => {
+                println!("future timeout for hop {}: {:?}", ttl, e);
+                (
+                    HopOrError::HopError(HopTimeOutError {
+                        message: "* wut?".to_string(),
+                        line: 0,
+                        column: 0,
+                    }),
+                    false,
+                )
+            }
+            Ok(r) => {
+                let (packet_len, sender) = r.unwrap();
+                let rtt = SteadyTime::now() - start_time;
+
+                // The IP packet that wraps the incoming ICMP message.
+                let (packet_in, ttl_in) =
+                    Self::static_unwrap_payload_ip_packet_in(&buf_in, src_addr, verbose);
+
+                match packet_in {
+                    IcmpPacketIn::V6(icmp_packet_in) => {
+                        match Self::static_analyse_v6_payload(
+                            &packet_out,
+                            &icmp_packet_in,
+                            ident,
+                            seq_num,
+                            max_hops,
+                            ttl,
+                            proto,
+                            public_ip,
+                            paris,
+                            verbose,
+                        ) {
+                            (Ok(()), done) => {
+                                let host = SocketAddr::V6(sender.as_inet6().unwrap());
+                                (
+                                    HopOrError::HopOk(TraceHop {
+                                        ttl: ttl_in,
+                                        size: packet_len,
+                                        from: FromIp(host),
+                                        hop_name: lookup_addr(&host.ip()).unwrap(),
+                                        rtt: HopDuration(rtt),
+                                    }),
+                                    done,
+                                )
+                            }
+                            (Err(ref err), done)
+                                if err.kind() == ErrorKind::InvalidData
+                                    || err.kind() == ErrorKind::Other =>
+                            {
+                                if verbose {
+                                    println!("Error occurred");
+                                    println!("{:?}", err);
+                                };
+                                (
+                                    HopOrError::HopError(HopTimeOutError {
+                                        message: "*".to_string(),
+                                        line: 0,
+                                        column: 0,
+                                    }),
+                                    done,
+                                )
+                            }
+                            (Err(e), done) => (
+                                HopOrError::HopError(HopTimeOutError {
+                                    message: e.to_string(),
+                                    line: 0,
+                                    column: 0,
+                                }),
+                                done,
+                            ),
+                        }
                     }
-                    complete => { break; }
+                    IcmpPacketIn::V4(ip_packet_in) => {
+                        let ip_payload = ip_packet_in.payload();
+                        let icmp_packet_in = IcmpPacket::new(&ip_packet_in.payload()).unwrap();
+                        match Self::static_analyse_v4_payload(
+                            &packet_out,
+                            &icmp_packet_in,
+                            &ip_payload,
+                            ident,
+                            seq_num,
+                            max_hops,
+                            ttl,
+                            proto,
+                            public_ip,
+                            paris,
+                            verbose,
+                        ) {
+                            (Ok(()), done) => {
+                                let host = SocketAddr::V4(sender.as_inet().unwrap());
+                                (
+                                    HopOrError::HopOk(TraceHop {
+                                        ttl: ttl_in,
+                                        size: packet_len,
+                                        from: FromIp(host),
+                                        hop_name: lookup_addr(&host.ip()).unwrap(),
+                                        rtt: HopDuration(rtt),
+                                    }),
+                                    done,
+                                )
+                            }
+                            (err, done) => {
+                                if verbose {
+                                    println!("* Error occured");
+                                    println!("{:?}", err);
+                                }
+                                (
+                                    HopOrError::HopError(HopTimeOutError {
+                                        message: "* wut?".to_string(),
+                                        line: 0,
+                                        column: 0,
+                                    }),
+                                    done,
+                                )
+                            }
+                        }
+                    }
                 }
             }
-        });
-        trace_result.result = trace_hops;
-        Ok(trace_result)
+        }
     }
 
     async fn hop_listen(
@@ -1091,24 +1708,55 @@ impl<'a> TraceHopsIterator<'a> {
 impl<'a> Stream for TraceHopsIterator<'a> {
     type Item = io::Result<TraceResult>;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let mut futures_buf: FuturesUnordered<LocalBoxFuture<'a, (HopOrError, bool)>> =
+            FuturesUnordered::new();
+
+        let mut trace_hops = Vec::with_capacity(self.spec.packets_per_hop as usize);
+
         if self.done {
             return Poll::Ready(None);
         }
         if self.ttl == self.spec.max_hops {
             return Poll::Ready(None);
         }
-        let trace_result = match self.next_hop() {
-            Ok(r) => Result::Ok(r),
+        let error = match self.next_hop(&mut futures_buf) {
+            Ok(()) => {
+                println!("no of futures : {:?}", futures_buf.len());
+                async_std::task::block_on(async {
+                    let mut done: bool;
+
+                    loop {
+                        select! {
+                            h = futures_buf.next() => {
+                                println!("async select {:?}", h);
+                                let hh: HopOrError = match h {
+                                    None => HopOrError::HopError(HopTimeOutError {message: "crazy".to_string(), line: 0, column: 0}),
+                                    Some(hop) => { done = hop.1; hop.0 }
+                                };
+                                trace_hops.push(hh);
+                            }
+                            complete => { break; }
+                        }
+                    }
+                });
+                Err(Error::new(ErrorKind::Other, "-42"))
+            }
             Err(e) => {
                 // This is a fatal condition,
                 // probably a socket that cannot be opened,
                 // or a packet that just gets stuck on its way out of localhost.
                 // gracefully end all this.
                 self.done = true;
-                Result::Err(e)
+                Err(e)
             }
         };
 
-        Poll::Ready(Some(trace_result))
+        let trace_result = TraceResult {
+            error: error,
+            hop: self.seq_num as u8,
+            result: trace_hops,
+        };
+
+        Poll::Ready(Some(Ok(trace_result)))
     }
 }

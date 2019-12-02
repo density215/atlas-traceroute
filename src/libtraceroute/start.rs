@@ -110,11 +110,11 @@ pub struct TraceRouteSpec {
     pub timeout: i64,
     pub uuid: String,
     // this implementation specific options
-    pub public_ip: Option<String>,
+    pub public_ip: Option<IpAddr>,
     pub verbose: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 pub enum TraceProtocol {
     ICMP,
     UDP,
