@@ -1303,7 +1303,7 @@ impl<'a> TraceHopsIterator<'a> {
     #[allow(unused_variables)]
     pub fn next_hop(
         &mut self,
-        future_buf: &FuturesUnordered<LocalBoxFuture<'a, (HopOrError, bool)>>,
+        future_buf: &FuturesUnordered<LocalBoxFuture<'a, (HopOrError, bool, u8)>>,
     ) -> io::Result<()> {
         self.seq_num += 1;
         if self.spec.verbose {
@@ -1445,7 +1445,7 @@ impl<'a> TraceHopsIterator<'a> {
         ident: u16,
         seq_num: u16,
         verbose: bool,
-    ) -> (HopOrError, bool) {
+    ) -> (HopOrError, bool, u8) {
         let dur = std::time::Duration::from_millis(1000 * timeout as u64);
         let mut buf_in: Vec<u8> = vec![0; MAX_PACKET_SIZE];
         match future::timeout(dur, socket_in.recv_from(buf_in.as_mut_slice())).await {
@@ -1458,6 +1458,7 @@ impl<'a> TraceHopsIterator<'a> {
                         column: 0,
                     }),
                     false,
+                    seq_num as u8,
                 )
             }
             Ok(r) => {
@@ -1493,6 +1494,7 @@ impl<'a> TraceHopsIterator<'a> {
                                         rtt: HopDuration(rtt),
                                     }),
                                     done,
+                                    seq_num as u8,
                                 )
                             }
                             (Err(ref err), done)
@@ -1510,6 +1512,7 @@ impl<'a> TraceHopsIterator<'a> {
                                         column: 0,
                                     }),
                                     done,
+                                    seq_num as u8,
                                 )
                             }
                             (Err(e), done) => (
@@ -1519,6 +1522,7 @@ impl<'a> TraceHopsIterator<'a> {
                                     column: 0,
                                 }),
                                 done,
+                                seq_num as u8,
                             ),
                         }
                     }
@@ -1549,6 +1553,7 @@ impl<'a> TraceHopsIterator<'a> {
                                         rtt: HopDuration(rtt),
                                     }),
                                     done,
+                                    seq_num as u8,
                                 )
                             }
                             (err, done) => {
@@ -1563,6 +1568,7 @@ impl<'a> TraceHopsIterator<'a> {
                                         column: 0,
                                     }),
                                     done,
+                                    seq_num as u8,
                                 )
                             }
                         }
@@ -1679,6 +1685,109 @@ impl<'a> TraceHopsIterator<'a> {
             }
         }
     }
+
+    #[allow(unused_variables)]
+    pub fn collect_all_futures(
+        &mut self,
+        futures_buf: &FuturesUnordered<LocalBoxFuture<'a, (HopOrError, bool, u8)>>,
+    ) -> io::Result<()> {
+        'hop: for hop_count in self.spec.start_ttl..self.spec.max_hops {
+            self.seq_num += 1;
+            self.ttl += 1;
+
+            if self.spec.verbose {
+                println!("==============");
+                println!("START HOP {}", self.seq_num);
+            }
+
+            // binding the src_addr makes sure no temporary
+            // ipv6 addresses are created to send the packet.
+            // Temporary ipv6 addresses (a privacy feature) will
+            // result in wrong UDP/TCP checksums, since that
+            // will use the secured IPv6 address of the interface
+            // sending as the src_addr to calculate checksums with.
+            self.socket_out
+                .bind(&SockAddr::from(self.src_addr))
+                .unwrap();
+
+            self.socket_out.set_reuse_address(true)?;
+
+            let src = SocketAddr::new(self.src_addr.ip(), self.ident);
+            // let mut futures_list = FuturesUnordered::new();
+
+            'trt: for count in 0..self.spec.packets_per_hop {
+                let ttl = self.set_ttl(&self.socket_out);
+                // self.ident = SRC_BASE_PORT - <u16>::from(rand::random::<u8>());
+                let packet_out = match self.spec.proto {
+                    TraceProtocol::ICMP => self.make_icmp_packet_out(),
+                    TraceProtocol::UDP => self.make_udp_packet_out(),
+                    TraceProtocol::TCP => self.make_tcp_packet_out(),
+                };
+
+                if self.spec.verbose {
+                    println!("identifier: {:02x}", &[self.ident].as_hex());
+                };
+
+                let dst_port_for_hop = match self.spec.proto {
+                    TraceProtocol::ICMP => self.seq_num + DST_BASE_PORT,
+                    // Increase the port number only for
+                    // classic traceroute for UDP,
+                    // paris traceroute uses the UDP checksum to identify
+                    // packets
+                    TraceProtocol::UDP => match self.spec.paris {
+                        None => self.seq_num + DST_BASE_PORT,
+                        Some(paris_id) => DST_BASE_PORT,
+                    },
+                    TraceProtocol::TCP => match self.spec.paris {
+                        None => self.spec.tcp_dest_port + self.seq_num,
+                        Some(paris_id) => self.spec.tcp_dest_port,
+                    },
+                };
+
+                // create it again, since we're borrowing non-mutable,
+                // we can't directly set the port.
+                let dst_addr: SockAddr =
+                    SocketAddr::new(self.dst_addr.ip(), dst_port_for_hop).into();
+
+                if self.spec.verbose {
+                    println!("dst_addr: {:?}", dst_addr);
+                    println!(
+                        "dst_addr port: {:?}/{:02x}",
+                        &[self.dst_addr.port()],
+                        &[self.dst_addr.port()].as_hex()
+                    );
+                    println!("local addr: {:?}", self.socket_out.local_addr());
+                };
+                let wrote = self.socket_out.send_to(&packet_out, &dst_addr)?;
+                assert_eq!(wrote, packet_out.len());
+                let start_time = SteadyTime::now();
+
+                // future_buf.push(
+                //     self.hop_listen(start_time, packet_out, self.spec.timeout as u64)
+                //         .boxed_local(),
+                // )
+                futures_buf.push(
+                    Self::static_hop_listen(
+                        &self.socket_in,
+                        start_time,
+                        packet_out,
+                        self.spec.timeout as u64,
+                        self.ttl,
+                        self.src_addr,
+                        self.spec.max_hops,
+                        self.spec.proto,
+                        self.spec.public_ip,
+                        self.spec.paris,
+                        self.ident,
+                        self.seq_num,
+                        self.spec.verbose,
+                    )
+                    .boxed_local(),
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 // impl Iterator for TraceHopsIterator {
@@ -1706,12 +1815,20 @@ impl<'a> TraceHopsIterator<'a> {
 // }
 
 impl<'a> Stream for TraceHopsIterator<'a> {
-    type Item = io::Result<TraceResult>;
+    type Item = io::Result<Vec<TraceResult>>;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let mut futures_buf: FuturesUnordered<LocalBoxFuture<'a, (HopOrError, bool)>> =
+        let mut futures_buf: FuturesUnordered<LocalBoxFuture<'a, (HopOrError, bool, u8)>> =
             FuturesUnordered::new();
 
-        let mut trace_hops = Vec::with_capacity(self.spec.packets_per_hop as usize);
+        let mut trace_hops = Vec::with_capacity(self.spec.max_hops as usize);
+
+        for x in 0..(self.spec.max_hops - self.spec.start_ttl) {
+            trace_hops.push(TraceResult {
+                hop: x as u8,
+                error: Err(Error::new(ErrorKind::Other, "-42")),
+                result: Vec::new(),
+            })
+        }
 
         if self.done {
             return Poll::Ready(None);
@@ -1719,7 +1836,7 @@ impl<'a> Stream for TraceHopsIterator<'a> {
         if self.ttl == self.spec.max_hops {
             return Poll::Ready(None);
         }
-        let error = match self.next_hop(&mut futures_buf) {
+        match self.collect_all_futures(&mut futures_buf) {
             Ok(()) => {
                 println!("no of futures : {:?}", futures_buf.len());
                 async_std::task::block_on(async {
@@ -1729,17 +1846,21 @@ impl<'a> Stream for TraceHopsIterator<'a> {
                         select! {
                             h = futures_buf.next() => {
                                 println!("async select {:?}", h);
-                                let hh: HopOrError = match h {
-                                    None => HopOrError::HopError(HopTimeOutError {message: "crazy".to_string(), line: 0, column: 0}),
-                                    Some(hop) => { done = hop.1; hop.0 }
+                                match h {
+                                    None => {
+                                        trace_hops[(self.seq_num - self.spec.start_ttl -1) as usize].error = Err(Error::new(ErrorKind::Other, "-42"));
+                                     },
+                                    Some(hop) => {
+                                        self.done = hop.1;
+                                        trace_hops[(hop.2 -1) as usize].result.push(hop.0);
+                                    }
                                 };
-                                trace_hops.push(hh);
                             }
                             complete => { break; }
                         }
                     }
                 });
-                Err(Error::new(ErrorKind::Other, "-42"))
+                // Err(Error::new(ErrorKind::Other, "-42"))
             }
             Err(e) => {
                 // This is a fatal condition,
@@ -1747,16 +1868,17 @@ impl<'a> Stream for TraceHopsIterator<'a> {
                 // or a packet that just gets stuck on its way out of localhost.
                 // gracefully end all this.
                 self.done = true;
-                Err(e)
+                trace_hops[self.seq_num as usize].error = Err(e);
+                // Err(e)
             }
         };
 
-        let trace_result = TraceResult {
-            error: error,
-            hop: self.seq_num as u8,
-            result: trace_hops,
-        };
+        // let trace_result = TraceResult {
+        //     error: error,
+        //     hop: self.seq_num as u8,
+        //     result: trace_hops,
+        // };
 
-        Poll::Ready(Some(Ok(trace_result)))
+        Poll::Ready(Some(Ok(trace_hops)))
     }
 }

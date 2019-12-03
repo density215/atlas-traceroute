@@ -307,12 +307,14 @@ fn main() {
                             println!("{:?}", e);
                         }
                         Ok(r) => {
-                            println!("{}", serde_json::to_string_pretty(r).unwrap());
-                            if verbose {
-                                println!("END HOP {}", r.hop);
-                                println!("==============");
-                                println!("");
-                            };
+                            for rr in r {
+                                println!("{}", serde_json::to_string_pretty(rr).unwrap());
+                                if verbose {
+                                    println!("END HOP {}", rr.hop);
+                                    println!("==============");
+                                    println!("");
+                                };
+                            }
                         }
                     }
                 }
