@@ -68,7 +68,7 @@ impl<'a> TraceRoute<'a> {
         start_dst_addr: SocketAddr,
         socket_in: &'a RawSocket,
         socket_out: Socket,
-        result_buf: &'a HopFutures,
+        ident_collection: &'a Vec<u16>,
     ) -> TraceRoute<'a> {
         let start_ttl = spec.start_ttl;
         TraceRoute {
@@ -92,7 +92,7 @@ impl<'a> TraceRoute<'a> {
                 start_ttl,
                 rand::random(),
                 start_ttl,
-                result_buf,
+                ident_collection,
             ),
         }
     }
@@ -152,86 +152,22 @@ pub fn sync_start_with_timeout<'a>(
     src_addr: SocketAddr,
     dst_addr: SocketAddr,
     socket_in: &'a RawSocket,
-    result_buf: &'a HopFutures,
+    ident_collection: &'a Vec<u16>,
 ) -> io::Result<TraceRoute<'a>> {
     match Duration::seconds(spec.timeout).num_microseconds() {
         None => return Err(Error::new(ErrorKind::InvalidInput, "Timeout too large")),
         Some(0) => return Err(Error::new(ErrorKind::InvalidInput, "Timeout too small")),
         _ => (),
     };
-
-    // let mut addr_iter = address.to_socket_addrs()?;
-
-    // let mut dst_addr = match spec.af {
-    //     // No address family was specified by the user
-    //     // so get the first resolved address we can get our hands on.
-    //     // That address will determine the address family.
-    //     None => match addr_iter.next() {
-    //         Some(addr) => addr,
-    //         None => panic!("Cannot parse the resolved IP address(es) for requested hostname"),
-    //     },
-    //     Some(af) => addr_iter
-    //         .find(|addr| match (addr, af) {
-    //             (SocketAddr::V4(_), AddressFamily::V4) => true,
-    //             (SocketAddr::V6(_), AddressFamily::V6) => true,
-    //             _ => false,
-    //         })
-    //         .expect("Cannot match requested address family and destination address."),
-    // };
-
-    // println!("dst addr {:?}", &dst_addr);
-    // TODO: for TCP there also needs to be a socket listening to Protocol TCP
-    // to catch the SYN+ACK packet coming in from the destination.
-    // which seems impossible to do in BSDs, so they would need to be caught at
-    // the datalink layer (with libpcap I guess), so maybe we should do that for
-    // all OSes (since we depend on lipcap anyway)?
-
-    // let src_addr;
-    // let socket_in;
-    // let af: AddressFamily;
-
-    // figure out the address family from the destination address.
-    // match dst_addr {
-    //     SocketAddr::V4(_) => {
-    //         src_addr = get_sock_addr(&AddressFamily::V4, SRC_BASE_PORT);
-    //         // af = AddressFamily::V4;
-    //         // *not* specifying a protocol will work for IPv4, but *NOT* for IPv6,
-    //         // set both.
-    //         // socket_in = Socket::new(Domain::ipv4(), Type::raw(), Some(<Protocol>::icmpv4()))?;
-    //         dst_addr.set_port(DST_BASE_PORT)
-    //     }
-    //     SocketAddr::V6(_) => {
-    //         src_addr = get_sock_addr(&AddressFamily::V6, SRC_BASE_PORT);
-    //         // af = AddressFamily::V6;
-    //         // *not* specifying a protocol will work for IPv4, but *NOT* for IPv6,
-    //         // will result in all errors.
-    //         // set both.
-    //         // socket_in = Socket::new(Domain::ipv6(), Type::raw(), Some(<Protocol>::icmpv6()))?;
-    //         dst_addr.set_port(DST_BASE_PORT)
-    //     }
-    // };
-    // let socket_in = async_std::task::block_on(async { RawSocket::bind(&src_addr).await }).unwrap();
-    // socket_in.set_reuse_address(true).unwrap();
-    // socket_in
-    //     .set_nonblocking(false)
-    //     .expect("Cannot set socket to blocking mode");
-
-    // println!("af: IP{:?}", af);
-    // println!("src_addr: {:?}", src_addr);
-    // println!("dst_addr: {:?}", dst_addr);
     println!("timestamp: {:?}", time::get_time().sec);
-
     let socket_out = create_socket_out(&spec.proto, src_addr.ip());
-    // let result_buf = HopFutures(Vec::with_capacity(
-    //     (spec.max_hops * spec.packets_per_hop as u16) as usize,
-    // ));
     let traceroute = TraceRoute::new(
         spec,
         src_addr,
         dst_addr,
         &socket_in,
         socket_out,
-        &result_buf,
+        &ident_collection,
     );
 
     Ok(traceroute)

@@ -249,7 +249,7 @@ pub struct TraceHopsIterator<'a> {
     pub seq_num: u16,
     pub done: bool,
     pub result: Vec<TraceResult>,
-    pub result_buf: &'a HopFutures, //Vec::with_capacity((spec.max_hops * spec.packets_per_hop as u16) as usize),
+    pub ident_collection: &'a Vec<u16>, //Vec::with_capacity((spec.max_hops * spec.packets_per_hop as u16) as usize),
 }
 
 // pub proto: TraceProtocol,
@@ -275,7 +275,7 @@ impl<'a> TraceHopsIterator<'a> {
         ttl: u16,
         ident: u16,
         seq_num: u16,
-        result_buf: &'a HopFutures,
+        ident_collection: &'a Vec<u16>,
     ) -> TraceHopsIterator<'a> {
         TraceHopsIterator {
             spec: spec,
@@ -286,7 +286,7 @@ impl<'a> TraceHopsIterator<'a> {
             seq_num: seq_num,
             done: false,
             result: Vec::new(),
-            result_buf: result_buf,
+            ident_collection: ident_collection,
             socket_in: socket_in,
             socket_out: socket_out,
         }
@@ -737,7 +737,7 @@ impl<'a> TraceHopsIterator<'a> {
         public_ip: Option<IpAddr>,
         paris: Option<u8>,
         verbose: bool,
-    ) -> Result<(), Error> {
+    ) -> Result<Option<u8>, Error> {
         // We don't have any ICMP header data right now
         // So we're only using the last 4 bytes in the payload to compare.
         // println!("wrapped ip packet: {:02x}", wrapped_ip_packet[..32].as_hex());
@@ -842,10 +842,19 @@ impl<'a> TraceHopsIterator<'a> {
         };
 
         match &proto {
-            &TraceProtocol::ICMP if wrapped_ip_packet[4..8] == packet_out[4..8] => Ok(()),
+            &TraceProtocol::ICMP if wrapped_ip_packet[4..8] == packet_out[4..8] => Ok(None),
             /* Some routers may return all of the udp packet we sent, so including the
              * payload.
              */
+            &TraceProtocol::ICMP
+                if wrapped_ip_packet[0..2] == packet_out[0..2]
+                    && wrapped_ip_packet[4..5] == packet_out[4..5] =>
+            {
+                if verbose {
+                    println!("😐 OTHER HOP (hop number {:?})", &wrapped_ip_packet[7]);
+                };
+                Ok(Some(wrapped_ip_packet[7]))
+            }
             &TraceProtocol::UDP
                 if wrapped_ip_packet.to_vec() == expected_packet
                     || wrapped_ip_packet == packet_out =>
@@ -853,7 +862,7 @@ impl<'a> TraceHopsIterator<'a> {
                 if verbose {
                     println!("😍 PERFECT MATCH (checksum, payload)");
                 };
-                Ok(())
+                Ok(None)
             }
             /* This should be the 'normal' situation, where 8 bytes from the udp packet
              * we sent are returned, i.e. the udp header
@@ -865,7 +874,7 @@ impl<'a> TraceHopsIterator<'a> {
                 if verbose {
                     println!("😁 CHECKSUM MATCH (no payload)");
                 };
-                Ok(())
+                Ok(None)
             }
             // this from the atlas traceroute probes implentation:
             /* Unfortunately, cheap home routers may
@@ -880,7 +889,7 @@ impl<'a> TraceHopsIterator<'a> {
                 if verbose {
                     println!("😐 PAYLOAD AND SRC PORT MATCH ONLY (no checksum)");
                 };
-                Ok(())
+                Ok(None)
             }
             // tnis might be a hop from an earlier probe, so then
             // dst_port should be higher than or equal to the udp base port
@@ -892,7 +901,7 @@ impl<'a> TraceHopsIterator<'a> {
                         <= DST_BASE_PORT + 0xff =>
             {
                 println!("wrong hopno! earlier hop");
-                Ok(())
+                Ok(Some(wrapped_ip_packet[7]))
             }
             // check to see if the source ports on the packet out and the reflected packet
             // match up. This is for classic sync traceroute only.
@@ -908,7 +917,7 @@ impl<'a> TraceHopsIterator<'a> {
                         icmp_packet_in[28..36].as_hex()
                     );
                 }
-                Ok(())
+                Ok(None)
             }
             &TraceProtocol::TCP
                 if wrapped_ip_packet[..22] == expected_packet[..22]
@@ -917,13 +926,13 @@ impl<'a> TraceHopsIterator<'a> {
                 if verbose {
                     println!("😍 PACKETS MATCHED");
                 }
-                Ok(())
+                Ok(None)
             }
             &TraceProtocol::TCP if wrapped_ip_packet[4..8] == expected_packet[4..8] => {
                 if verbose {
                     println!("😁 SRC PORT AND SEQUENCE NUMBER MATCHED");
                 }
-                Ok(())
+                Ok(None)
             }
             &TraceProtocol::TCP
                 if wrapped_ip_packet[16..18] == expected_packet[16..18]
@@ -932,14 +941,14 @@ impl<'a> TraceHopsIterator<'a> {
                 if verbose {
                     println!("😁 SRC PORT AND CHECKSUM MATCH (no sequence number, no payload)");
                 };
-                Ok(())
+                Ok(None)
             }
             // see the above comment about cutting off of reflected ip packets
             &TraceProtocol::TCP if wrapped_ip_snip == &expected_packet[..wrapped_ip_snip.len()] => {
                 if verbose {
                     println!("😐 SRC AND DST PORT MATCH ONLY (no sequence number, no checksum, no payload)");
                 }
-                Ok(())
+                Ok(None)
             }
             _ => {
                 if verbose {
@@ -1049,7 +1058,7 @@ impl<'a> TraceHopsIterator<'a> {
         packet_out: &[u8],
         icmp_packet_in: &IcmpPacket,
         ip_payload: &[u8],
-        ident: u16,
+        ident_collection: &Vec<u16>,
         seq_num: u16,
         max_hops: u16,
         ttl: u16,
@@ -1057,7 +1066,7 @@ impl<'a> TraceHopsIterator<'a> {
         public_ip: Option<IpAddr>,
         paris: Option<u8>,
         verbose: bool,
-    ) -> (Result<(), Error>, bool) {
+    ) -> (Result<Option<u8>, Error>, bool) {
         match icmp_packet_in.get_icmp_type() {
             IcmpTypes::TimeExceeded => {
                 // This is where intermediate packets with TTL set to lower than the number of hops
@@ -1096,11 +1105,18 @@ impl<'a> TraceHopsIterator<'a> {
             // packages from the requested server should come as ICMP type Echo Reply
             IcmpTypes::EchoReply => {
                 let icmp_echo_reply = EchoReplyPacket::new(&ip_payload).unwrap();
-                if icmp_echo_reply.get_identifier() == ident
-                    && icmp_echo_reply.get_sequence_number() == seq_num
+                if verbose {
+                    println!(
+                        "{:?} -> {:?}",
+                        icmp_echo_reply.get_identifier(),
+                        ident_collection
+                    );
+                }
+                if ident_collection.contains(&icmp_echo_reply.get_identifier())
+                // && icmp_echo_reply.get_sequence_number() <= max_hops
                 {
                     // self.done = true;
-                    (Ok(()), true)
+                    (Ok(Some(icmp_packet_in.packet()[7] as u8)), true)
                 } else {
                     (Err(Error::new(ErrorKind::InvalidData, "invalid ")), false)
                 }
@@ -1214,13 +1230,14 @@ impl<'a> TraceHopsIterator<'a> {
         icmp_packet_in: &Icmpv6Packet,
         ident: u16,
         seq_num: u16,
+        ident_collection: &'a Vec<u16>,
         max_hops: u16,
         ttl: u16,
         proto: TraceProtocol,
         public_ip: Option<IpAddr>,
         paris: Option<u8>,
         verbose: bool,
-    ) -> (Result<(), Error>, bool) {
+    ) -> (Result<Option<u8>, Error>, bool) {
         match icmp_packet_in.get_icmpv6_type() {
             Icmpv6Types::EchoReply => {
                 //println!("icmp payload: {:02x}", icmp_packet_in.payload().as_hex());
@@ -1228,7 +1245,7 @@ impl<'a> TraceHopsIterator<'a> {
                     && icmp_packet_in.get_sequence_number() == seq_num
                 {
                     // self.done = true;
-                    (Ok(()), true)
+                    (Ok(None), true)
                 } else {
                     //println!("seq: {:?}", icmp_packet_in.get_sequence_number());
                     (Err(Error::new(ErrorKind::InvalidData, "invalid ")), false)
@@ -1300,136 +1317,126 @@ impl<'a> TraceHopsIterator<'a> {
         }
     }
 
-    #[allow(unused_variables)]
-    pub fn next_hop(
-        &mut self,
-        future_buf: &FuturesUnordered<LocalBoxFuture<'a, (HopOrError, bool, u8)>>,
-    ) -> io::Result<()> {
-        self.seq_num += 1;
-        if self.spec.verbose {
-            println!("==============");
-            println!("START HOP {}", self.seq_num);
-        }
+    // #[allow(unused_variables)]
+    // pub fn next_hop(
+    //     &mut self,
+    //     future_buf: &FuturesUnordered<LocalBoxFuture<'a, (HopOrError, bool, u8)>>,
+    // ) -> io::Result<()> {
+    //     self.seq_num += 1;
+    //     if self.spec.verbose {
+    //         println!("==============");
+    //         println!("START HOP {}", self.seq_num);
+    //     }
 
-        let mut trace_result = TraceResult {
-            error: Err(Error::new(ErrorKind::Other, "-42")),
-            hop: self.seq_num as u8,
-            // result: HopFutures(Vec::with_capacity(self.spec.packets_per_hop as usize)),
-            result: Vec::with_capacity(self.spec.packets_per_hop as usize),
-        };
+    //     let trace_result = TraceResult {
+    //         error: Err(Error::new(ErrorKind::Other, "-42")),
+    //         hop: self.seq_num as u8,
+    //         // result: HopFutures(Vec::with_capacity(self.spec.packets_per_hop as usize)),
+    //         result: Vec::with_capacity(self.spec.packets_per_hop as usize),
+    //     };
 
-        self.ttl += 1;
-        // let mut trace_hops: Vec<Box<dyn Future<Output = HopOrError>>> =
-        //     Vec::with_capacity(self.spec.packets_per_hop as usize);
-        // let mut trace_hops = Vec::with_capacity(self.spec.packets_per_hop as usize);
+    //     // collect the idents that are generated for the outgoing packets,
+    //     // so we can compare on all incoming packets.
+    //     let mut ident_collection: Vec<u16> = Vec::with_capacity(
+    //         (self.spec.packets_per_hop as u16
+    //             * (self.spec.max_hops as u16 - self.spec.start_ttl as u16 + 1))
+    //             as usize,
+    //     );
 
-        // binding the src_addr makes sure no temporary
-        // ipv6 addresses are created to send the packet.
-        // Temporary ipv6 addresses (a privacy feature) will
-        // result in wrong UDP/TCP checksums, since that
-        // will use the secured IPv6 address of the interface
-        // sending as the src_addr to calculate checksums with.
-        self.socket_out
-            .bind(&SockAddr::from(self.src_addr))
-            .unwrap();
+    //     self.ttl += 1;
+    //     // let mut trace_hops: Vec<Box<dyn Future<Output = HopOrError>>> =
+    //     //     Vec::with_capacity(self.spec.packets_per_hop as usize);
+    //     // let mut trace_hops = Vec::with_capacity(self.spec.packets_per_hop as usize);
 
-        self.socket_out.set_reuse_address(true)?;
+    //     // binding the src_addr makes sure no temporary
+    //     // ipv6 addresses are created to send the packet.
+    //     // Temporary ipv6 addresses (a privacy feature) will
+    //     // result in wrong UDP/TCP checksums, since that
+    //     // will use the secured IPv6 address of the interface
+    //     // sending as the src_addr to calculate checksums with.
+    //     self.socket_out
+    //         .bind(&SockAddr::from(self.src_addr))
+    //         .unwrap();
 
-        let src = SocketAddr::new(self.src_addr.ip(), self.ident);
-        // let mut futures_list = FuturesUnordered::new();
+    //     self.socket_out.set_reuse_address(true)?;
 
-        'trt: for count in 0..self.spec.packets_per_hop {
-            let ttl = self.set_ttl(&self.socket_out);
-            // self.ident = SRC_BASE_PORT - <u16>::from(rand::random::<u8>());
-            let packet_out = match self.spec.proto {
-                TraceProtocol::ICMP => self.make_icmp_packet_out(),
-                TraceProtocol::UDP => self.make_udp_packet_out(),
-                TraceProtocol::TCP => self.make_tcp_packet_out(),
-            };
+    //     let src = SocketAddr::new(self.src_addr.ip(), self.ident);
+    //     // let mut futures_list = FuturesUnordered::new();
 
-            if self.spec.verbose {
-                println!("identifier: {:02x}", &[self.ident].as_hex());
-            };
+    //     'trt: for count in 0..self.spec.packets_per_hop {
+    //         let ttl = self.set_ttl(&self.socket_out);
+    //         self.ident = SRC_BASE_PORT - <u16>::from(rand::random::<u8>());
+    //         // ident_collection.push(self.ident);
+    //         let packet_out = match self.spec.proto {
+    //             TraceProtocol::ICMP => self.make_icmp_packet_out(),
+    //             TraceProtocol::UDP => self.make_udp_packet_out(),
+    //             TraceProtocol::TCP => self.make_tcp_packet_out(),
+    //         };
 
-            let dst_port_for_hop = match self.spec.proto {
-                TraceProtocol::ICMP => self.seq_num + DST_BASE_PORT,
-                // Increase the port number only for
-                // classic traceroute for UDP,
-                // paris traceroute uses the UDP checksum to identify
-                // packets
-                TraceProtocol::UDP => match self.spec.paris {
-                    None => self.seq_num + DST_BASE_PORT,
-                    Some(paris_id) => DST_BASE_PORT,
-                },
-                TraceProtocol::TCP => match self.spec.paris {
-                    None => self.spec.tcp_dest_port + self.seq_num,
-                    Some(paris_id) => self.spec.tcp_dest_port,
-                },
-            };
+    //         if self.spec.verbose {
+    //             println!("identifier: {:02x}", &[self.ident].as_hex());
+    //         };
 
-            // create it again, since we're borrowing non-mutable,
-            // we can't directly set the port.
-            let dst_addr: SockAddr = SocketAddr::new(self.dst_addr.ip(), dst_port_for_hop).into();
+    //         let dst_port_for_hop = match self.spec.proto {
+    //             TraceProtocol::ICMP => self.seq_num + DST_BASE_PORT,
+    //             // Increase the port number only for
+    //             // classic traceroute for UDP,
+    //             // paris traceroute uses the UDP checksum to identify
+    //             // packets
+    //             TraceProtocol::UDP => match self.spec.paris {
+    //                 None => self.seq_num + DST_BASE_PORT,
+    //                 Some(paris_id) => DST_BASE_PORT,
+    //             },
+    //             TraceProtocol::TCP => match self.spec.paris {
+    //                 None => self.spec.tcp_dest_port + self.seq_num,
+    //                 Some(paris_id) => self.spec.tcp_dest_port,
+    //             },
+    //         };
 
-            if self.spec.verbose {
-                println!("dst_addr: {:?}", dst_addr);
-                println!(
-                    "dst_addr port: {:?}/{:02x}",
-                    &[self.dst_addr.port()],
-                    &[self.dst_addr.port()].as_hex()
-                );
-                println!("local addr: {:?}", self.socket_out.local_addr());
-            };
-            let wrote = self.socket_out.send_to(&packet_out, &dst_addr)?;
-            assert_eq!(wrote, packet_out.len());
-            let start_time = SteadyTime::now();
+    //         // create it again, since we're borrowing non-mutable,
+    //         // we can't directly set the port.
+    //         let dst_addr: SockAddr = SocketAddr::new(self.dst_addr.ip(), dst_port_for_hop).into();
 
-            // future_buf.push(
-            //     self.hop_listen(start_time, packet_out, self.spec.timeout as u64)
-            //         .boxed_local(),
-            // )
-            future_buf.push(
-                Self::static_hop_listen(
-                    &self.socket_in,
-                    start_time,
-                    packet_out,
-                    self.spec.timeout as u64,
-                    self.ttl,
-                    self.src_addr,
-                    self.spec.max_hops,
-                    self.spec.proto,
-                    self.spec.public_ip,
-                    self.spec.paris,
-                    self.ident,
-                    self.seq_num,
-                    self.spec.verbose,
-                )
-                .boxed_local(),
-            );
-        }
+    //         if self.spec.verbose {
+    //             println!("dst_addr: {:?}", dst_addr);
+    //             println!(
+    //                 "dst_addr port: {:?}/{:02x}",
+    //                 &[self.dst_addr.port()],
+    //                 &[self.dst_addr.port()].as_hex()
+    //             );
+    //             println!("local addr: {:?}", self.socket_out.local_addr());
+    //         };
+    //         let wrote = self.socket_out.send_to(&packet_out, &dst_addr)?;
+    //         assert_eq!(wrote, packet_out.len());
+    //         let start_time = SteadyTime::now();
 
-        // println!("no of futures : {:?}", futures_list.len());
-        // async_std::task::block_on(async {
-        //     let mut done: bool;
+    //         // future_buf.push(
+    //         //     self.hop_listen(start_time, packet_out, self.spec.timeout as u64)
+    //         //         .boxed_local(),
+    //         // )
+    //         future_buf.push(
+    //             Self::static_hop_listen(
+    //                 &self.socket_in,
+    //                 start_time,
+    //                 packet_out,
+    //                 self.spec.timeout as u64,
+    //                 self.ttl,
+    //                 self.src_addr,
+    //                 self.spec.max_hops,
+    //                 self.spec.proto,
+    //                 self.spec.public_ip,
+    //                 self.spec.paris,
+    //                 self.ident,
+    //                 ident_collection.to_owned(),
+    //                 self.seq_num,
+    //                 self.spec.verbose,
+    //             )
+    //             .boxed_local(),
+    //         );
+    //     }
 
-        //     loop {
-        //         select! {
-        //             h = futures_list.next() => {
-        //                 println!("async select {:?}", h);
-        //                 let hh: HopOrError = match h {
-        //                     None => HopOrError::HopError(HopTimeOutError {message: "crazy".to_string(), line: 0, column: 0}),
-        //                     Some(hop) => { done = hop.1; hop.0 }
-        //                 };
-        //                 trace_hops.push(hh);
-        //             }
-        //             complete => { break; }
-        //         }
-        //     }
-        // });
-        // trace_result.result = trace_hops;
-        // Ok(trace_result)
-        Ok(())
-    }
+    //     Ok(())
+    // }
 
     async fn static_hop_listen(
         socket_in: &'a RawSocket,
@@ -1443,8 +1450,10 @@ impl<'a> TraceHopsIterator<'a> {
         public_ip: Option<IpAddr>,
         paris: Option<u8>,
         ident: u16,
+        ident_collection: &'a Vec<u16>,
         seq_num: u16,
         verbose: bool,
+        // the result of the hop (from, ttl, etc.), true if the last hop has been reached: "done", inferred hop number
     ) -> (HopOrError, bool, u8) {
         let dur = std::time::Duration::from_millis(1000 * timeout as u64);
         let mut buf_in: Vec<u8> = vec![0; MAX_PACKET_SIZE];
@@ -1476,6 +1485,7 @@ impl<'a> TraceHopsIterator<'a> {
                             &icmp_packet_in,
                             ident,
                             seq_num,
+                            ident_collection,
                             max_hops,
                             ttl,
                             proto,
@@ -1483,7 +1493,7 @@ impl<'a> TraceHopsIterator<'a> {
                             paris,
                             verbose,
                         ) {
-                            (Ok(()), done) => {
+                            (Ok(_), done) => {
                                 let host = SocketAddr::V6(sender.as_inet6().unwrap());
                                 (
                                     HopOrError::HopOk(TraceHop {
@@ -1533,7 +1543,7 @@ impl<'a> TraceHopsIterator<'a> {
                             &packet_out,
                             &icmp_packet_in,
                             &ip_payload,
-                            ident,
+                            ident_collection,
                             seq_num,
                             max_hops,
                             ttl,
@@ -1542,7 +1552,7 @@ impl<'a> TraceHopsIterator<'a> {
                             paris,
                             verbose,
                         ) {
-                            (Ok(()), done) => {
+                            (Ok(inferred_seq_num), done) => {
                                 let host = SocketAddr::V4(sender.as_inet().unwrap());
                                 (
                                     HopOrError::HopOk(TraceHop {
@@ -1553,7 +1563,10 @@ impl<'a> TraceHopsIterator<'a> {
                                         rtt: HopDuration(rtt),
                                     }),
                                     done,
-                                    seq_num as u8,
+                                    match inferred_seq_num {
+                                        Some(seq_num) => seq_num,
+                                        _ => seq_num as u8,
+                                    },
                                 )
                             }
                             (err, done) => {
@@ -1691,6 +1704,8 @@ impl<'a> TraceHopsIterator<'a> {
         &mut self,
         futures_buf: &FuturesUnordered<LocalBoxFuture<'a, (HopOrError, bool, u8)>>,
     ) -> io::Result<()> {
+        let mut ident_iterator = self.ident_collection.iter();
+
         'hop: for hop_count in self.spec.start_ttl..self.spec.max_hops {
             self.seq_num += 1;
             self.ttl += 1;
@@ -1713,11 +1728,11 @@ impl<'a> TraceHopsIterator<'a> {
             self.socket_out.set_reuse_address(true)?;
 
             let src = SocketAddr::new(self.src_addr.ip(), self.ident);
-            // let mut futures_list = FuturesUnordered::new();
 
             'trt: for count in 0..self.spec.packets_per_hop {
                 let ttl = self.set_ttl(&self.socket_out);
                 // self.ident = SRC_BASE_PORT - <u16>::from(rand::random::<u8>());
+                self.ident = ident_iterator.next().unwrap().to_owned();
                 let packet_out = match self.spec.proto {
                     TraceProtocol::ICMP => self.make_icmp_packet_out(),
                     TraceProtocol::UDP => self.make_udp_packet_out(),
@@ -1758,14 +1773,11 @@ impl<'a> TraceHopsIterator<'a> {
                     );
                     println!("local addr: {:?}", self.socket_out.local_addr());
                 };
+
                 let wrote = self.socket_out.send_to(&packet_out, &dst_addr)?;
                 assert_eq!(wrote, packet_out.len());
                 let start_time = SteadyTime::now();
 
-                // future_buf.push(
-                //     self.hop_listen(start_time, packet_out, self.spec.timeout as u64)
-                //         .boxed_local(),
-                // )
                 futures_buf.push(
                     Self::static_hop_listen(
                         &self.socket_in,
@@ -1779,6 +1791,7 @@ impl<'a> TraceHopsIterator<'a> {
                         self.spec.public_ip,
                         self.spec.paris,
                         self.ident,
+                        &self.ident_collection,
                         self.seq_num,
                         self.spec.verbose,
                     )
@@ -1820,9 +1833,9 @@ impl<'a> Stream for TraceHopsIterator<'a> {
         let mut futures_buf: FuturesUnordered<LocalBoxFuture<'a, (HopOrError, bool, u8)>> =
             FuturesUnordered::new();
 
-        let mut trace_hops = Vec::with_capacity(self.spec.max_hops as usize);
+        let mut trace_hops: Vec<TraceResult> = Vec::with_capacity(self.spec.max_hops as usize);
 
-        for x in 0..(self.spec.max_hops - self.spec.start_ttl) {
+        for x in 0..(self.spec.max_hops - self.spec.start_ttl + 1) {
             trace_hops.push(TraceResult {
                 hop: x as u8,
                 error: Err(Error::new(ErrorKind::Other, "-42")),
@@ -1840,7 +1853,7 @@ impl<'a> Stream for TraceHopsIterator<'a> {
             Ok(()) => {
                 println!("no of futures : {:?}", futures_buf.len());
                 async_std::task::block_on(async {
-                    let mut done: bool;
+                    // let mut done: bool;
 
                     loop {
                         select! {
@@ -1848,11 +1861,11 @@ impl<'a> Stream for TraceHopsIterator<'a> {
                                 println!("async select {:?}", h);
                                 match h {
                                     None => {
-                                        trace_hops[(self.seq_num - self.spec.start_ttl -1) as usize].error = Err(Error::new(ErrorKind::Other, "-42"));
+                                        trace_hops[(self.seq_num - self.spec.start_ttl) as usize].error = Err(Error::new(ErrorKind::Other, "-42"));
                                      },
                                     Some(hop) => {
                                         self.done = hop.1;
-                                        trace_hops[(hop.2 -1) as usize].result.push(hop.0);
+                                        trace_hops[(hop.2 - self.spec.start_ttl as u8) as usize].result.push(hop.0);
                                     }
                                 };
                             }
@@ -1873,12 +1886,13 @@ impl<'a> Stream for TraceHopsIterator<'a> {
             }
         };
 
-        // let trace_result = TraceResult {
-        //     error: error,
-        //     hop: self.seq_num as u8,
-        //     result: trace_hops,
-        // };
-
-        Poll::Ready(Some(Ok(trace_hops)))
+        // trace_hops contains all hops counting from zero,
+        // but if the user specified a hight start TTL then we
+        // don't want to return the hops lower that start ttl.
+        let trace_hops_from_first_ttl: Vec<TraceResult> = trace_hops
+            .into_iter()
+            .filter(|h| h.hop >= self.spec.start_ttl as u8)
+            .collect();
+        Poll::Ready(Some(Ok(trace_hops_from_first_ttl)))
     }
 }

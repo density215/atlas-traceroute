@@ -246,10 +246,6 @@ fn main() {
     let verbose = spec.verbose;
     // let src_addr = get_sock_addr(&AddressFamily::V4, 3360);
 
-    let result_buf = &HopFutures(Vec::with_capacity(
-        (spec.max_hops * spec.packets_per_hop as u16) as usize,
-    ));
-
     // let mut addr_iter = addr.to_socket_addrs()?;
 
     let mut dst_addr = match spec.af {
@@ -295,7 +291,15 @@ fn main() {
 
     let socket_in = &async_std::task::block_on(async { RawSocket::bind(&src_addr).await }).unwrap();
 
-    match sync_start_with_timeout(spec, src_addr, dst_addr, &socket_in, &result_buf) {
+    let num_packs: u16 =
+        spec.packets_per_hop as u16 * (spec.max_hops as u16 - spec.start_ttl as u16) + 1;
+    println!("num packs : {:?}", num_packs);
+    let mut ident_collection: Vec<u16> = Vec::with_capacity(num_packs as usize);
+    for _ in 0..num_packs + 1 {
+        ident_collection.push(SRC_BASE_PORT - <u16>::from(rand::random::<u8>()));
+    }
+
+    match sync_start_with_timeout(spec, src_addr, dst_addr, &socket_in, &ident_collection) {
         Ok(mut traceroute) => {
             traceroute.start_time = Some(time::get_time().sec);
             println!("traceroute meta: {:?}", traceroute);
