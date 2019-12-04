@@ -1891,7 +1891,7 @@ impl<'a> Stream for TraceHopsIterator<'a> {
         // don't want to return the hops lower that start ttl.
         let trace_hops_from_first_ttl: Vec<TraceResult> = trace_hops
             .into_iter()
-            .filter(|h| h.hop >= self.spec.start_ttl as u8)
+            .filter(|h| h.hop != 0 && h.hop >= self.spec.start_ttl as u8)
             .collect();
         Poll::Ready(Some(Ok(trace_hops_from_first_ttl)))
     }
