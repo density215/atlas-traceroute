@@ -35,6 +35,13 @@ pub fn debug_print_packet_in(
                 &expected_udp_packet[20..].as_hex()
             );
         }
+        TraceProtocol::ICMP => {
+            println!("icmp packet out: {:02x}", &packet_out.as_hex());
+            println!(
+                "expected icmp payload: {:02x} (should be the same)",
+                &expected_udp_packet.as_hex()
+            );
+        }
         _ => {
             println!("not implemented");
         }
@@ -67,6 +74,9 @@ pub fn debug_print_packet_in(
         TraceProtocol::TCP => {
             println!("tcp header: {:02x}", &packet[28..48].as_hex());
             println!("tcp payload: {:02x}", &packet[48..64].as_hex());
+        }
+        TraceProtocol::ICMP => {
+            println!("encapsulated icmp packet: {:02x}", &packet[28..48].as_hex());
         }
         _ => {
             println!("not implemented");
