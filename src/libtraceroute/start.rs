@@ -1,13 +1,11 @@
 use std::io::{self, Error, ErrorKind};
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr};
 
 use pnet::datalink::NetworkInterface;
 use socket2::*;
 use time::Duration;
 
-use crate::libtraceroute::iterators::{
-    HopFutures, TraceHopsIterator, DST_BASE_PORT, SRC_BASE_PORT,
-};
+use crate::libtraceroute::iterators::TraceHopsIterator;
 use crate::rawsocket::async_std::RawSocket;
 
 // The outgoing is socket is always of type ICMP,

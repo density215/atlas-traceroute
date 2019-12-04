@@ -1,11 +1,7 @@
+use serde_json;
 use structopt;
 
-// use serde;
-use serde_json;
-
-// use std::env;
 use std::path::PathBuf;
-// use std::str::FromStr;
 use std::str::FromStr;
 use structopt::StructOpt;
 
@@ -13,18 +9,11 @@ use traceroute::libtraceroute::start::{
     sync_start_with_timeout, AddressFamily, TraceProtocol, TraceRouteSpec,
 };
 
-use async_std::pin::Pin;
 use async_std::prelude::*;
-use async_std::stream::Stream;
-use async_std::task::{Context, Poll};
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
-use traceroute::libtraceroute::iterators::{
-    HopFutures, TraceHopsIterator, DST_BASE_PORT, SRC_BASE_PORT,
-};
+use std::net::{SocketAddr, ToSocketAddrs};
+use traceroute::libtraceroute::iterators::{DST_BASE_PORT, SRC_BASE_PORT};
 use traceroute::libtraceroute::start::get_sock_addr;
 use traceroute::rawsocket::async_std::RawSocket;
-
-// use trac::d::*;
 
 // „I prefer zeroes on the loose
 // to those lined up behind a cipher.‟
@@ -158,27 +147,6 @@ struct TraceRouteOpt {
     verbose: bool,
 }
 
-// impl Stream for TraceHopsIterator {
-//     type Item = u8;
-//     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-//         if self.done {
-//             return Poll::Ready(None);
-//         }
-//         let trace_result = match self.next_hop() {
-//             Ok(r) => r.hop,
-//             Err(e) => {
-//                 // This is a fatal condition,
-//                 // probably a socket that cannot be opened,
-//                 // or a packet that just gets stuck on its way out of localhost.
-//                 // gracefully end all this.
-//                 self.done = true;
-//                 0
-//             }
-//         };
-
-//         Poll::Ready(Some(trace_result))
-//     }
-// }
 fn main() {
     println!("type: traceroute");
     let opt = TraceRouteOpt::from_args();
@@ -304,7 +272,6 @@ fn main() {
             traceroute.start_time = Some(time::get_time().sec);
             println!("traceroute meta: {:?}", traceroute);
             async_std::task::block_on(async {
-                // let trace_hops: TraceHopsIterator = traceroute.trace_hops;
                 while let Some(result) = traceroute.trace_hops.next().await {
                     match &result {
                         Err(e) => {
