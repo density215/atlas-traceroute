@@ -135,8 +135,8 @@ fn static_analyse_icmp_packet_in(
         }
         TraceProtocol::TCP => {
             let mut tcp_packet = MutableTcpPacket::owned(packet_out.to_vec()).unwrap();
-            let pub_ip = match public_ip.unwrap() {
-                IpAddr::V4(ip) => Some(ip),
+            let pub_ip = match public_ip {
+                Some(IpAddr::V4(ip)) => Some(ip),
                 _ => None,
             };
 
@@ -180,6 +180,7 @@ fn static_analyse_icmp_packet_in(
          */
         &TraceProtocol::ICMP
             if wrapped_ip_packet[0..2] == packet_out[0..2]
+            // rough estimation, this assumes first byte of dst_port does not change.
                 && wrapped_ip_packet[4..5] == packet_out[4..5] =>
         {
             if verbose {
@@ -282,6 +283,12 @@ fn static_analyse_icmp_packet_in(
             }
             Ok(None)
         }
+        &TraceProtocol::TCP if icmp_packet_in[28..30] == expected_packet[..2] => {
+            if verbose {
+                println!("😐 OTHER HOP (hop number {:?})", &icmp_packet_in[35]);
+            }
+            Ok(None)
+        }
         _ => {
             if verbose {
                 println!("😠 UNIDENTIFIED INCOMING PACKET");
@@ -291,6 +298,10 @@ fn static_analyse_icmp_packet_in(
                 println!(
                     "64b of icmp in packet: {:02x}",
                     &icmp_packet_in[..64].as_hex()
+                );
+                println!(
+                    "packet in byte 28 -> ${:02x}",
+                    &icmp_packet_in[28..64].as_hex()
                 );
             };
             Err(Error::new(
@@ -303,17 +314,21 @@ fn static_analyse_icmp_packet_in(
 
 pub fn static_analyse_v4_payload(
     packet_out: &[u8],
-    icmp_packet_in: &IcmpPacket,
-    ip_payload: &[u8],
+    // icmp_packet_in: &IcmpPacket,
+    // ip_payload: &[u8],
+    ip_packet_in: pnet::packet::ipv4::Ipv4Packet,
     ident_collection: &Vec<u16>,
-    seq_num: u16,
-    max_hops: u16,
-    ttl: u16,
+    // seq_num: u16,
+    // max_hops: u16,
+    // ttl: u16,
     proto: TraceProtocol,
     public_ip: Option<IpAddr>,
     paris: Option<u8>,
     verbose: bool,
 ) -> (Result<Option<u8>, Error>, bool) {
+    let ip_payload = ip_packet_in.payload();
+    let icmp_packet_in = IcmpPacket::new(&ip_packet_in.payload()).unwrap();
+
     match icmp_packet_in.get_icmp_type() {
         IcmpTypes::TimeExceeded => {
             // This is where intermediate packets with TTL set to lower than the number of hops
@@ -322,10 +337,13 @@ pub fn static_analyse_v4_payload(
             // `Time Exceeded` packages do not have a identifier or sequence number
             // They do return up to 576 bytes of the original IP packet
             // So that's where we identify the packet to belong to this `packet_out`.
-            if ttl == max_hops {
-                // self.done = true;
-                return (Err(Error::new(ErrorKind::TimedOut, "too many hops")), true);
-            }
+
+            // It's not up to this function anymore to decide whether the ttl is incorrect
+            // that only works for sync traceroutes.
+            // if ttl == max_hops {
+            //     // self.done = true;
+            //     return (Err(Error::new(ErrorKind::TimedOut, "too many hops")), true);
+            // }
             let icmp_time_exceeded = TimeExceededPacket::new(ip_payload)
                 .unwrap()
                 .payload()
@@ -369,7 +387,7 @@ pub fn static_analyse_v4_payload(
             }
         }
 
-        // UDP and TCP packets that were send out should get these as the final answer,
+        // UDP and TCP packets that were sent out should get these as the final answer,
         // that is, only if the requested server does not listen on the destination port!
         IcmpTypes::DestinationUnreachable => {
             // self.done = true;

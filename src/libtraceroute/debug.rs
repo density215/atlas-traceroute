@@ -42,9 +42,6 @@ pub fn debug_print_packet_in(
                 &expected_udp_packet.as_hex()
             );
         }
-        _ => {
-            println!("not implemented");
-        }
     }
     println!("-------------------------");
     println!("incoming packet breakdown");
@@ -77,9 +74,6 @@ pub fn debug_print_packet_in(
         }
         TraceProtocol::ICMP => {
             println!("encapsulated icmp packet: {:02x}", &packet[28..48].as_hex());
-        }
-        _ => {
-            println!("not implemented");
         }
     }
     println!(

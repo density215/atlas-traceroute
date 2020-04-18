@@ -333,16 +333,17 @@ impl<'a> TraceHopsIterator<'a> {
                         }
                     }
                     IcmpPacketIn::V4(ip_packet_in) => {
-                        let ip_payload = ip_packet_in.payload();
-                        let icmp_packet_in = IcmpPacket::new(&ip_packet_in.payload()).unwrap();
+                        // let ip_payload = ip_packet_in.payload();
+                        // let icmp_packet_in = IcmpPacket::new(&ip_packet_in.payload()).unwrap();
                         match static_analyse_v4_payload(
                             &packet_out,
-                            &icmp_packet_in,
-                            &ip_payload,
+                            // &icmp_packet_in,
+                            // &ip_payload,
+                            ip_packet_in,
                             ident_collection,
-                            seq_num,
-                            max_hops,
-                            ttl,
+                            // seq_num,
+                            // max_hops,
+                            // ttl,
                             proto,
                             public_ip,
                             paris,

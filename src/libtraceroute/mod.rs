@@ -1,6 +1,7 @@
 mod debug;
 pub mod iterators;
+mod packet;
 pub mod start;
 
-pub mod packet;
-pub use packet::out;
+pub use packet::rx;
+pub use packet::tx;
