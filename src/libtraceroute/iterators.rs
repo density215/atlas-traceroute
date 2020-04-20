@@ -723,9 +723,8 @@ impl<'a> TraceHopsIterator<'a> {
                 // `Time Exceeded` packages do not have a identifier or sequence number
                 // They do return up to 576 bytes of the original IP packet
                 // So that's where we identify the packet to belong to this `packet_out`.
-                if self.ttl == self.spec.max_hops {
+                if self.ttl >= self.spec.max_hops {
                     self.done = true;
-                    return Err(Error::new(ErrorKind::TimedOut, "too many hops"));
                 }
                 let wrapped_ip_packet = Ipv6Packet::new(&icmp_packet_in.payload()).unwrap();
 
