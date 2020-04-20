@@ -704,10 +704,20 @@ impl<'a> TraceHopsIterator<'a> {
                     Err(Error::new(ErrorKind::InvalidData, "invalid "))
                 }
             }
-            Icmpv6Types::DestinationUnreachable => Err(Error::new(
-                ErrorKind::AddrNotAvailable,
-                "destination unreachable",
-            )),
+            Icmpv6Types::DestinationUnreachable => {
+                self.done = true;
+
+                if self.ttl >= self.spec.max_hops {
+                    return Err(Error::new(ErrorKind::TimedOut, "too many hops"));
+                }
+                let wrapped_ip_packet = Ipv6Packet::new(&icmp_packet_in.payload()).unwrap();
+
+                self.analyse_icmp_packet_in(
+                    wrapped_ip_packet.payload(),
+                    &icmp_packet_in.packet(),
+                    packet_out,
+                )
+            }
             Icmpv6Types::TimeExceeded => {
                 //println!("time exceeded: {:02x}", icmp_packet_in.payload().as_hex());
                 // `Time Exceeded` packages do not have a identifier or sequence number
