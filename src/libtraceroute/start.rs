@@ -69,7 +69,7 @@ impl<'a> TraceRoute<'a> {
             spec: spec,
             start_src_addr: start_src_addr.ip(),
             start_dst_addr: start_dst_addr.ip(),
-            // Do not the current timestamp as start_time here, since the iterator is lazy,
+            // Do not use the current timestamp as start_time here, since the iterator is lazy,
             // so None indicates that the iterator has not been run and no attemtps have been
             // made to send packets.
             start_time: None,
