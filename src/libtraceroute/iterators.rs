@@ -840,6 +840,8 @@ impl<'a> TraceHopsIterator<'a> {
             // "invalid argument", not at socket creation time, not at bind time,
             // but when trying to use sendto.
             //
+            // read http://www.linux-ipv6.org/ml/usagi-users/msg02249.html
+            // 
             // Note1: For IPv6 only, IPv4 works just fine setting any dst_port.
             // Note2: This is just for setting the destination port on the socket,
             // in the packet headers we're still using the actual dst_port_for_hop
