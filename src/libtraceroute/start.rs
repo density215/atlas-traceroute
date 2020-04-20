@@ -24,7 +24,20 @@ pub fn create_socket_out(proto: &TraceProtocol, src_addr: IpAddr) -> Socket {
         TraceProtocol::TCP => Some(<Protocol>::tcp()),
     };
 
-    let sock_type = Type::raw();
+    // For IPv4 we can *always* use a raw socket, it can be combined
+    // with all protocols and set the destination ports.
+    // For Ipv6 however, on Linux, we cannot use a raw socket and set
+    // the sin6_port ourselves (it will end in an error 22: "Invalid Argument") on
+    // sendto. The sin6_port *HAS TO BE* set to the binary of IPPROTO_* you're using
+    // or to 0.
+    let sock_type = match (proto, af) {
+        (_, IpAddr::V4(_)) => Type::raw(),
+        (TraceProtocol::ICMP, IpAddr::V6(_)) => Type::raw(),
+        // just because we can we use SOCK_DGRAM here, don't forget to set the
+        // right port then on the Socket later on at hop time.
+        (TraceProtocol::UDP, IpAddr::V6(_)) => Type::dgram(), 
+        (TraceProtocol::TCP, IpAddr::V6(_)) => Type::raw(),
+    };
 
     let socket_out = match src_addr {
         IpAddr::V4(_) => Socket::new(Domain::ipv4(), sock_type, protocol).unwrap(),

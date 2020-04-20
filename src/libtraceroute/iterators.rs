@@ -39,7 +39,7 @@ use byteorder::{ByteOrder, NetworkEndian};
 use hex_slice::AsHex;
 
 use super::debug::debug_print_packet_in;
-use super::start::{TraceProtocol, TraceRouteSpec};
+use super::start::{AddressFamily, TraceProtocol, TraceRouteSpec};
 
 pub const MAX_PACKET_SIZE: usize = 4096 + 128;
 pub const ICMP_HEADER_LEN: usize = 8;
@@ -775,17 +775,23 @@ impl<'a> TraceHopsIterator<'a> {
         let mut trace_hops: Vec<HopOrError> =
             Vec::with_capacity(self.spec.packets_per_hop as usize);
 
+        // self.socket_out.set_only_v6(true).unwrap();
+
         // binding the src_addr makes sure no temporary
         // ipv6 addresses are created to send the packet.
         // Temporary ipv6 addresses (a privacy feature) will
         // result in wrong UDP/TCP checksums, since that
         // will use the secured IPv6 address of the interface
         // sending as the src_addr to calculate checksums with.
+        // and **AGAIN** Linux cannot deal with binding the socket
+        // multiple times (error 22 bla bla),
+        // so we're only doing it once.
+        if self.seq_num == self.spec.start_ttl + 1 {
+            self.socket_out.set_reuse_address(true).unwrap();
         self.socket_out
             .bind(&SockAddr::from(self.src_addr))
             .unwrap();
-
-        self.socket_out.set_reuse_address(true)?;
+        }
 
         let src = SocketAddr::new(self.src_addr.ip(), self.ident);
 
@@ -817,7 +823,25 @@ impl<'a> TraceHopsIterator<'a> {
                     Some(paris_id) => self.spec.tcp_dest_port,
                 },
             };
-            self.dst_addr.set_port(dst_port_for_hop);
+
+            // No clue why, but apparently for Linux for IPv6 RAW sockets you have to set
+            // the dst_port of the socket to the binary number of
+            // IPPROTO_ICMPv6 (decimal 58 in Linux) or 0.
+            // Either one seems to work. Any other number will fail with a Error 22
+            // "invalid argument", not at socket creation time, not at bind time,
+            // but when trying to use sendto.
+            //
+            // Note1: For IPv6 only, IPv4 works just fine setting any dst_port.
+            // Note2: This is just for setting the destination port on the socket,
+            // in the packet headers we're still using the actual dst_port_for_hop
+            // Note3: It's only for RAW sockets, so for udp we can use SOCK_DGRAM and
+            //        still use the sin6_port, which would have the advantage
+            //        that we could receive the final UDP package from the destination.
+            match (&self.spec.proto, &self.spec.af) {
+                (&TraceProtocol::TCP, &Some(AddressFamily::V6))
+                | (&TraceProtocol::ICMP, &Some(AddressFamily::V6)) => self.dst_addr.set_port(0),
+                _ => self.dst_addr.set_port(dst_port_for_hop),
+            }
 
             if self.spec.verbose {
                 println!("dst_addr: {}", self.dst_addr.ip());
@@ -826,11 +850,17 @@ impl<'a> TraceHopsIterator<'a> {
                     &[self.dst_addr.port()],
                     &[self.dst_addr.port()].as_hex()
                 );
+                println!(
+                    "packet header port: {:?}/{:#x}",
+                    dst_port_for_hop, dst_port_for_hop
+                );
                 println!("local addr: {:?}", self.socket_out.local_addr());
+                println!("dst addr: {:?}", self.dst_addr);
             };
             let wrote = self
                 .socket_out
-                .send_to(&packet_out, &<SockAddr>::from(self.dst_addr))?;
+                .send_to(&packet_out, &<SockAddr>::from(self.dst_addr))
+                .unwrap();
             assert_eq!(wrote, packet_out.len());
             let start_time = SteadyTime::now();
 
