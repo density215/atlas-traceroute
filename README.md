@@ -35,5 +35,6 @@ Relies on some changes in crate pnet and mio (for the async traceroutes).
 - cd inside the repo
 - Use nightly: `rustup override set nightly` (if you want nightly only in this repo).
 - Clone the modified version of libpnet with `git clone https://github.com/density215/libpnet`
+- Clone the modified version of mio with `git clone --single-branch --branch raw-socket https://github.com/density215/mio mio_release`.
 - Build a release with `cargo build --release`. The binary will be `target/release/traceroute`. Make sure you chown it to root and set suid bit on it `chmod +s traceroute` to be able to use raw sockets.
 - For development you an use `cargo run -- <OPTION GO HERE>`. Probably you will have to either run this as root or prepend `cargo` with `sudo`. In either case you will have to install rust as root.
