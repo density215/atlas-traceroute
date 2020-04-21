@@ -30,8 +30,10 @@ Installation right now is from source only. You'll have to have an up-to-date Ru
 Relies on rust-nightly (`rustup install nightly` and `rustup default nightly`).
 Relies on some changes in crate pnet and mio (for the async traceroutes).
 
-- Install Rust
+- Install Rust (https://rustup.rs/)
 - Clone this Repo with `git clone`
 - cd inside the repo
+- Use nightly: `rustup override set nightly` (if you want nightly only in this repo).
 - Clone the modified version of libpnet with `git clone https://github.com/density215/libpnet`
 - Build a release with `cargo build --release`. The binary will be `target/release/traceroute`. Make sure you chown it to root and set suid bit on it `chmod +s traceroute` to be able to use raw sockets.
+- For development you an use `cargo run -- <OPTION GO HERE>`. Probably you will have to either run this as root or prepend `cargo` with `sudo`. In either case you will have to install rust as root.
